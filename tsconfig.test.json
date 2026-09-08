@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "outDir": ".test-build", "rootDir": ".", "allowJs": false },
+  "include": ["miniprogram/**/*.ts", "typings/**/*.d.ts"],
+  "exclude": ["node_modules", ".test-build"]
+}

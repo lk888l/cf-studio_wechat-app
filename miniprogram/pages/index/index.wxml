@@ -1,0 +1,412 @@
+<view class="gamepad-shell">
+  <view class="topbar">
+    <view class="brand"
+      ><view class="brand-mark"><view></view><view></view><view></view></view
+      ><text class="brand-name">CF STUDIO</text><text class="model-name">WL1</text></view
+    >
+    <view class="connection-status"
+      ><view class="status-dot {{ready ? 'status-dot-ready' : ''}}"></view
+      ><text>{{statusLabel}}</text></view
+    >
+    <view class="topbar-actions">
+      <button
+        class="nav-button {{tab === 'control' ? 'nav-active' : ''}}"
+        data-tab="control"
+        bindtap="switchTab"
+      >
+        遥控
+      </button>
+      <button
+        class="nav-button {{tab === 'connection' ? 'nav-active' : ''}}"
+        data-tab="connection"
+        bindtap="switchTab"
+      >
+        连接
+      </button>
+      <button
+        class="nav-button {{tab === 'console' ? 'nav-active' : ''}}"
+        data-tab="console"
+        bindtap="switchTab"
+      >
+        日志
+      </button>
+    </view>
+    <view class="demo-control"
+      ><text class="demo-label {{demo ? 'demo-on' : ''}}">{{demo ? 'SIM' : '模拟'}}</text
+      ><switch
+        class="mini-switch"
+        checked="{{demo}}"
+        disabled="{{busy}}"
+        color="#458dcc"
+        bindchange="toggleDemo"
+        aria-label="模拟模式，不发送蓝牙指令"
+    /></view>
+  </view>
+
+  <view wx:if="{{tab === 'control'}}" class="control-page">
+    <view class="controller-stage">
+      <view class="stick-column">
+        <view class="stick-heading"
+          ><text class="stick-channel">L</text><text>行进 / 转向</text
+          ><text class="stick-unit">RPM</text></view
+        >
+        <view class="stick-area {{!armed || !ready ? 'control-disabled' : ''}}">
+          <text class="axis-label axis-top">前进</text><text class="axis-label axis-left">左转</text
+          ><text class="axis-label axis-right">右转</text
+          ><text class="axis-label axis-bottom">后退</text>
+          <view class="disk-wrap">
+            <view
+              id="joystick"
+              class="joystick"
+              catchtouchstart="onJoystickStart"
+              catchtouchmove="onJoystickMove"
+              catchtouchend="onJoystickEnd"
+              catchtouchcancel="onJoystickEnd"
+              aria-label="左摇杆，上下行进，左右转向，松手停止"
+            >
+              <view class="joystick-ring"></view><view class="joystick-axis joystick-axis-x"></view
+              ><view class="joystick-axis joystick-axis-y"></view
+              ><view class="joystick-center"></view>
+              <view class="joystick-knob" style="transform: translate({{knobX}}px, {{knobY}}px);"
+                ><view class="knob-grip"><view></view><view></view><view></view></view
+              ></view>
+            </view>
+          </view>
+        </view>
+        <text class="stick-caption"
+          >{{armed && ready ? '松手停止 · 单次最多 5 秒' : '启用控制后操作'}}</text
+        >
+      </view>
+
+      <view class="instrument-panel">
+        <view class="instrument-heading"
+          ><text>控制目标</text
+          ><text class="screen-badge"
+            >{{demo ? 'SIM' : (profileIndex === 0 ? 'MAIN' : '待验证')}}</text
+          ></view
+        >
+        <view class="target-grid">
+          <view class="target-cell"
+            ><text class="target-label">行进速度</text
+            ><view class="target-reading"
+              ><text class="target-value">{{control.speed}}</text
+              ><text class="target-unit">RPM</text></view
+            ></view
+          >
+          <view class="target-cell"
+            ><text class="target-label">转向目标</text
+            ><view class="target-reading"
+              ><text class="target-value">{{control.turn}}</text
+              ><text class="target-unit">RPM</text></view
+            ></view
+          >
+          <view class="target-cell"
+            ><text class="target-label">机身高度</text
+            ><view class="target-reading"
+              ><text class="target-value">{{control.height}}</text
+              ><text class="target-unit">mm</text></view
+            ></view
+          >
+          <view class="target-cell"
+            ><text class="target-label">左右横滚</text
+            ><view class="target-reading"
+              ><text class="target-value">{{control.roll > 0 ? '+' : ''}}{{control.roll}}</text
+              ><text class="target-unit">°</text></view
+            ></view
+          >
+        </view>
+        <view class="feedback-strip">
+          <block wx:if="{{lastReceive}}"
+            ><view class="feedback-heading"
+              ><text>RX 原文 · {{receiveCount}}</text><text>{{lastReceiveAt}}</text></view
+            ><text class="feedback-value" selectable>{{lastReceive}}</text></block
+          >
+          <block wx:else
+            ><text class="feedback-empty">设备实测：尚无结构化回传</text
+            ><text class="feedback-note"
+              >{{demo ? '模拟模式 · 不发送真实指令' : '当前数值为指令目标'}}</text
+            ></block
+          >
+        </view>
+        <view class="command-strip"
+          ><text class="command-count">{{demo ? 'SIM' : 'TX'}} {{sentCount}}</text
+          ><text class="command-frame" selectable>{{lastFrame || '等待控制指令'}}</text></view
+        >
+      </view>
+
+      <view class="stick-column">
+        <view class="stick-heading"
+          ><text class="stick-channel">R</text><text>腿高 / 横滚</text
+          ><text class="stick-unit">POSE</text></view
+        >
+        <view class="stick-area {{!armed || !ready ? 'control-disabled' : ''}}">
+          <text class="axis-label axis-top">升高</text><text class="axis-label axis-left">左倾</text
+          ><text class="axis-label axis-right">右倾</text
+          ><text class="axis-label axis-bottom">降低</text>
+          <view class="disk-wrap">
+            <view
+              id="leg-joystick"
+              class="joystick"
+              catchtouchstart="onLegJoystickStart"
+              catchtouchmove="onLegJoystickMove"
+              catchtouchend="onLegJoystickEnd"
+              catchtouchcancel="onLegJoystickEnd"
+              aria-label="右摇杆，上下调腿高，左右调横滚，松手保持高度并回正横滚"
+            >
+              <view class="joystick-ring"></view><view class="joystick-axis joystick-axis-x"></view
+              ><view class="joystick-axis joystick-axis-y"></view
+              ><view class="joystick-center"></view>
+              <view
+                class="joystick-knob"
+                style="transform: translate({{legKnobX}}px, {{legKnobY}}px);"
+                ><view class="knob-grip"><view></view><view></view><view></view></view
+              ></view>
+            </view>
+          </view>
+        </view>
+        <text class="stick-caption">松手保留高度 · 横滚回正</text>
+      </view>
+    </view>
+
+    <view class="bottom-controls">
+      <view class="arming-control"
+        ><view
+          ><text class="arming-label">启用本地控制</text
+          ><text class="arming-state"
+            >{{!ready ? '先连接设备或启用模拟' : (armed ? '已启用 · 双手操作' :
+            '摇杆已锁定')}}</text
+          ></view
+        ><switch
+          class="arm-switch"
+          checked="{{armed}}"
+          disabled="{{!ready || busy}}"
+          color="#458dcc"
+          bindchange="toggleArmed"
+          aria-label="启用本地控制"
+      /></view>
+      <picker
+        class="speed-picker"
+        range="{{speedModes}}"
+        value="{{speedModeIndex}}"
+        disabled="{{armed || busy}}"
+        bindchange="onSpeedModeChange"
+        ><view class="speed-picker-inner"
+          ><view
+            ><text class="speed-label">速度档位</text
+            ><text class="speed-value">{{speedModes[speedModeIndex]}}</text></view
+          ><text class="picker-chevron">⌄</text></view
+        ></picker
+      >
+      <button class="stop-button" bindtap="stopMotion" disabled="{{!ready}}">
+        <view class="stop-icon"></view><text>停止运动</text
+        ><text class="stop-detail">目标归零</text>
+      </button>
+    </view>
+    <view class="status-line {{error || ble.error ? 'status-line-error' : ''}}"
+      ><text wx:if="{{error || ble.error}}" class="status-message">{{error || ble.error}}</text
+      ><text wx:else class="status-message"
+        >主分支无失联超时保护 · 请先停止再断开 · 停止不会断电</text
+      ><text class="status-code">{{demo ? 'LOCAL SIMULATION' : 'WL1 / UART CONTROL'}}</text></view
+    >
+  </view>
+
+  <scroll-view
+    wx:elif="{{tab === 'connection'}}"
+    class="side-scroll"
+    scroll-y
+    enhanced
+    show-scrollbar="{{false}}"
+  >
+    <view class="side-content">
+      <view class="side-page-heading"
+        ><view
+          ><text class="eyebrow">BLUETOOTH LOW ENERGY</text
+          ><text class="section-title">设备连接</text></view
+        ><picker
+          range="{{profileNames}}"
+          value="{{profileIndex}}"
+          disabled="{{busy}}"
+          bindchange="onProfileChange"
+          ><view class="profile-picker"
+            ><text>{{profileNames[profileIndex]}}</text><text>⌄</text></view
+          ></picker
+        ></view
+      >
+      <view wx:if="{{error || ble.error}}" class="error-notice"
+        ><text selectable>{{error || ble.error}}</text></view
+      >
+      <view class="compatibility-note"
+        ><view class="notice-icon">i</view
+        ><view
+          ><text class="notice-title">当前 JDY-31 不能由微信小程序直连</text
+          ><text class="notice-copy"
+            >已实测 JDY-31（Bluetooth 3.0 / SPP），与常见 HC-05 一样属于经典蓝牙串口。请使用支持 BLE
+            GATT 的串口透传模块。</text
+          ></view
+        ></view
+      >
+      <view class="connection-grid">
+        <view class="panel connection-panel">
+          <view class="section-heading"
+            ><text class="panel-title">发现附近设备</text><view class="small-badge">BLE</view></view
+          >
+          <text class="section-description"
+            >{{demo ? '关闭上方模拟模式后，即可扫描真实设备。' : (ble.deviceId ?
+            '当前已有连接，请先断开再扫描其他设备。' :
+            '打开手机蓝牙，将已供电的模块靠近手机。')}}</text
+          >
+          <view class="connection-actions"
+            ><button
+              wx:if="{{ble.status !== 'scanning'}}"
+              class="button button-primary"
+              bindtap="startScan"
+              disabled="{{busy || demo || ble.deviceId}}"
+              loading="{{busy}}"
+            >
+              扫描 BLE 设备</button
+            ><button wx:else class="button button-secondary" bindtap="stopScan">停止扫描</button
+            ><button
+              wx:if="{{ble.deviceId}}"
+              class="button button-secondary"
+              bindtap="disconnectDevice"
+              disabled="{{busy}}"
+            >
+              断开连接
+            </button></view
+          >
+          <view class="device-list-heading"
+            ><text>可用设备</text><text>{{ble.devices.length || 0}} FOUND</text></view
+          >
+          <view wx:if="{{!ble.devices.length}}" class="empty-state"
+            ><text class="empty-symbol">◎</text
+            ><text class="empty-title"
+              >{{ble.status === 'scanning' ? '正在寻找附近的 BLE 设备' : '还没有发现设备'}}</text
+            ><text class="empty-description"
+              >{{ble.status === 'scanning' ? '请确认模块已供电，并支持 BLE。' :
+              '开始扫描后，附近设备会显示在这里。'}}</text
+            ></view
+          >
+          <view wx:for="{{ble.devices}}" wx:key="deviceId" class="device-row"
+            ><view class="device-symbol">BLE</view
+            ><view class="discovered-device"
+              ><text class="device-name">{{item.name || '未命名 BLE 设备'}}</text
+              ><text class="device-id" selectable>{{item.deviceId}}</text
+              ><text class="device-signal">信号 {{item.rssi || '--'}} dBm</text></view
+            ><button
+              class="button button-small"
+              data-id="{{item.deviceId}}"
+              bindtap="connectDevice"
+              disabled="{{busy || demo}}"
+            >
+              连接
+            </button></view
+          >
+        </view>
+        <view class="connection-details">
+          <view wx:if="{{ble.endpoints.length}}" class="panel endpoint-panel"
+            ><view class="section-heading"
+              ><text class="panel-title">选择串口端点</text
+              ><view class="small-badge">{{ble.endpoints.length}}</view></view
+            ><text class="section-description"
+              >对照模块资料选择透传写入特征，确认后才可发送指令。</text
+            ><button
+              wx:for="{{ble.endpoints}}"
+              wx:key="writeId"
+              class="endpoint-option {{ble.endpoint && ble.endpoint.serviceId === item.serviceId && ble.endpoint.writeId === item.writeId ? 'endpoint-selected' : ''}}"
+              data-index="{{index}}"
+              bindtap="selectEndpoint"
+              disabled="{{busy || ble.status !== 'selecting'}}"
+            >
+              <view class="endpoint-heading"
+                ><text>{{item.label || ('端点 ' + (index + 1))}}</text
+                ><view class="endpoint-radio"></view></view
+              ><text class="endpoint-label">SERVICE</text
+              ><text class="endpoint-uuid">{{item.serviceId}}</text
+              ><text class="endpoint-label">WRITE / {{item.writeType}}</text
+              ><text class="endpoint-uuid">{{item.writeId}}</text
+              ><block wx:if="{{item.notifyId}}"
+                ><text class="endpoint-label">NOTIFY</text
+                ><text class="endpoint-uuid">{{item.notifyId}}</text></block
+              >
+            </button></view
+          >
+          <view class="help-panel"
+            ><button class="help-toggle" bindtap="toggleHelp">
+              <view><text class="eyebrow">SETUP NOTES</text><text>接线说明与当前限制</text></view
+              ><text class="help-chevron">{{helpOpen ? '−' : '+'}}</text></button
+            ><view wx:if="{{helpOpen}}" class="help-content"
+              ><view class="help-section"
+                ><text class="help-title">01 / 串口透传接线</text
+                ><text
+                  >模块 TX → 小车 PA10（RX）；模块 RX → 小车 PA15（TX）；GND 共地。小车串口为 115200
+                  / 8N1。供电与 IO 电平以模块资料为准。</text
+                ></view
+              ><view class="help-section"
+                ><text class="help-title">02 / 当前适配范围</text
+                ><text
+                  >当前适配 WL1 主分支。SoftEngine 尚未验证，暂不开放控制。COM3 实测 JDY-31-V1.35
+                  串口为 9600，与小车 115200 不一致；更换 BLE 模块后也需匹配小车串口参数。</text
+                ></view
+              ><view class="help-section"
+                ><text class="help-title">03 / 双摇杆与失联</text
+                ><text
+                  >左杆松手停止行进与转向；右杆松手保持腿高、横滚回正。本地控制开关只限制本页面操作。主分支没有失联超时保护，退后台或蓝牙断开后可能继续执行最后指令。请先停止，再断开，并保留可触及的物理断电方式。</text
+                ></view
+              ><view class="help-section"
+                ><text class="help-title">04 / 目标与设备回传</text
+                ><text
+                  >遥控台数字是控制目标，不是实测速度或姿态。RX
+                  只展示串口通知原文；没有结构化回传时不推测设备状态。写入成功不代表电机已执行，模拟模式不会连接或控制真实设备。</text
+                ></view
+              ></view
+            ></view
+          >
+        </view>
+      </view>
+    </view>
+  </scroll-view>
+
+  <scroll-view wx:else class="side-scroll" scroll-y enhanced show-scrollbar="{{false}}">
+    <view class="side-content console-content"
+      ><view class="side-page-heading"
+        ><view
+          ><text class="eyebrow">SERIAL MONITOR</text
+          ><text class="section-title">收发日志</text></view
+        ><view class="small-badge">{{demo ? 'SIM / 本地模拟' : 'BLE / 串口原文'}}</view></view
+      ><view wx:if="{{error || ble.error}}" class="error-notice"
+        ><text selectable>{{error || ble.error}}</text></view
+      ><view class="panel console-panel"
+        ><view class="console-toolbar"
+          ><view
+            ><text class="panel-title">{{logs.length}} 条记录</text
+            ><text class="section-description"
+              >{{demo ? '本地模拟操作，不发送真实蓝牙指令。' :
+              '蓝牙写入与模块通知原文，便于联调串口协议。'}}</text
+            ></view
+          ><view class="console-actions"
+            ><button class="text-button" bindtap="copyLogs" disabled="{{!logs.length}}">
+              复制日志</button
+            ><button class="text-button" bindtap="clearLogs" disabled="{{!logs.length}}">
+              清空
+            </button></view
+          ></view
+        ><view class="log-list"
+          ><view wx:if="{{!logs.length}}" class="empty-state"
+            ><text class="empty-symbol">&gt;_</text
+            ><text class="empty-title">串口安静，等待指令</text
+            ><text class="empty-description"
+              >连接设备或使用模拟模式，操作记录将显示在这里。</text
+            ></view
+          ><view wx:for="{{logs}}" wx:key="id" class="log-entry"
+            ><view class="log-meta"
+              ><text class="log-time">{{item.time}}</text
+              ><text class="log-direction {{item.direction === 'RX' ? 'log-rx' : ''}}"
+                >{{item.direction}}</text
+              ></view
+            ><text class="log-text" selectable>{{item.text}}</text></view
+          ></view
+        ></view
+      ><text class="console-note">蓝牙写入成功不等于设备动作已确认。</text></view
+    >
+  </scroll-view>
+</view>

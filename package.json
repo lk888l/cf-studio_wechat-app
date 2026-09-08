@@ -1,0 +1,21 @@
+{
+  "name": "cf-studio-remote",
+  "version": "1.0.0",
+  "description": "CF Studio 多设备蓝牙遥控台，首个设备 WL1",
+  "private": true,
+  "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check:templates": "node scripts/check-templates.cjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test tests/*.test.cjs",
+    "check": "npm run format:check && npm run typecheck && npm test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "",
+  "devDependencies": {
+    "prettier": "3.6.2",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules
+.npm-cache
+.test-build
+typings
+project.private.config.json
+package-lock.json

@@ -1,0 +1,11 @@
+{
+  "pages": ["pages/index/index"],
+  "window": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "CF STUDIO",
+    "navigationBarBackgroundColor": "#f2f8ff",
+    "backgroundColor": "#f2f8ff"
+  },
+  "style": "v2",
+  "lazyCodeLoading": "requiredComponents"
+}
