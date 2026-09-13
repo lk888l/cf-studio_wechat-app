@@ -1,5 +1,6 @@
 import { RemoteController } from '../../control/controller';
 import { deviceProfiles, joystickVector, legJoystickVector, wl1Main } from '../../devices/profiles';
+import { parseTuningValue, tuningGroups } from '../../devices/tuning';
 import { onBackground } from '../../services/lifecycle';
 import { BleState, BleTransport } from '../../transport/ble';
 
@@ -16,6 +17,19 @@ interface JoystickRect {
   height: number;
 }
 type ValueEvent = WechatMiniprogram.CustomEvent<{ value: string | number }>;
+const panelSettingsKey = 'wl1-control-panel-v1';
+function createTuningGroups(profileId: string) {
+  return tuningGroups(profileId).map((group) => ({
+    ...group,
+    parameters: group.parameters.map((parameter) => ({
+      ...parameter,
+      draft: parameter.initial.toFixed(parameter.digits),
+      sliderMaximum: Math.round((parameter.maximum - parameter.minimum) / parameter.step),
+      sliderValue: Math.round((parameter.initial - parameter.minimum) / parameter.step),
+      status: '固件参考值 · 未发送',
+    })),
+  }));
+}
 const initialBle: BleState = {
   status: 'idle',
   devices: [],
@@ -60,6 +74,11 @@ Page({
     helpOpen: false,
     profileNames: ['WL1 · main（已适配）', 'WL1 · SoftEngine（串口适配）'],
     profileIndex: 0,
+    panelModeIndex: 0,
+    tuningGroupIndex: 0,
+    tuningGroups: createTuningGroups(wl1Main.id),
+    tuningBusy: '',
+    tuningMessage: '',
   },
   transport: null as BleTransport | null,
   controller: null as RemoteController | null,
@@ -75,8 +94,23 @@ Page({
   destroyed: false,
   logId: 0,
   suspension: null as Promise<void> | null,
+  tuningEpoch: 0,
 
   onLoad() {
+    try {
+      const settings = wx.getStorageSync(panelSettingsKey);
+      if (settings && typeof settings === 'object') {
+        this.setData({
+          panelModeIndex: settings.mode === 1 ? 1 : 0,
+          tuningGroupIndex:
+            Number.isInteger(settings.group) && settings.group >= 0 && settings.group < 5
+              ? settings.group
+              : 0,
+        });
+      }
+    } catch {
+      // Storage is optional; the original instrument panel remains the default.
+    }
     this.transport = new BleTransport();
     this.controller = new RemoteController(
       wl1Main,
@@ -116,6 +150,8 @@ Page({
         if (ble.deviceId !== this.data.ble.deviceId) {
           this.setData({ lastReceive: '', lastReceiveAt: '', receiveCount: 0 });
         }
+        if (ready !== this.data.ready || ble.deviceId !== this.data.ble.deviceId)
+          this.resetTuning();
         this.setData({
           ble,
           ready,
@@ -252,6 +288,7 @@ Page({
         error: '',
       });
       this.controller?.setReady(ready);
+      this.resetTuning();
       this.addLog(
         'INFO',
         demo ? '已进入模拟演练，所有帧仅在本地展示。' : '已退出模拟，请重新连接 BLE 设备。',
@@ -461,7 +498,141 @@ Page({
         ready,
         error: '',
       });
+      this.resetTuning();
     });
+  },
+
+  resetTuning() {
+    this.tuningEpoch += 1;
+    this.setData({
+      tuningGroups: createTuningGroups(deviceProfiles[this.data.profileIndex].id),
+      tuningBusy: '',
+      tuningMessage: '',
+    });
+  },
+  savePanelSettings() {
+    try {
+      wx.setStorageSync(panelSettingsKey, {
+        mode: this.data.panelModeIndex,
+        group: this.data.tuningGroupIndex,
+      });
+    } catch {
+      this.addLog('INFO', '面板设置本次有效，本地保存失败。');
+    }
+  },
+  onPanelModeChange(event: WechatMiniprogram.CustomEvent<{ value: boolean }>) {
+    if (typeof event.detail.value !== 'boolean') return;
+    this.setData({ panelModeIndex: event.detail.value ? 1 : 0 });
+    this.savePanelSettings();
+  },
+  onTuningGroupChange(event: ValueEvent) {
+    const index = Number(event.detail.value);
+    if (!Number.isInteger(index) || !this.data.tuningGroups[index]) return;
+    this.setData({ tuningGroupIndex: index });
+    this.savePanelSettings();
+  },
+  findTuningParameter(id: string) {
+    return this.data.tuningGroups
+      .flatMap((group) => group.parameters)
+      .find((parameter) => parameter.id === id);
+  },
+  updateTuningParameter(
+    id: string,
+    update: { draft?: string; status?: string; sliderValue?: number },
+  ) {
+    const groupIndex = this.data.tuningGroups.findIndex((group) =>
+      group.parameters.some((parameter) => parameter.id === id),
+    );
+    if (groupIndex < 0) return;
+    const parameterIndex = this.data.tuningGroups[groupIndex].parameters.findIndex(
+      (parameter) => parameter.id === id,
+    );
+    const prefix = `tuningGroups[${groupIndex}].parameters[${parameterIndex}]`;
+    const patch: Record<string, string | number> = {};
+    if (update.draft !== undefined) patch[`${prefix}.draft`] = update.draft;
+    if (update.status !== undefined) patch[`${prefix}.status`] = update.status;
+    if (update.sliderValue !== undefined) patch[`${prefix}.sliderValue`] = update.sliderValue;
+    // Keep native input focus and the scroll position while editing one row.
+    this.setData(patch);
+  },
+  onTuningInput(event: ValueEvent) {
+    const id = String(event.currentTarget.dataset.id || '');
+    const parameter = this.findTuningParameter(id);
+    if (!parameter || parameter.unavailable || this.data.tuningBusy === id) return;
+    const draft = String(event.detail.value);
+    let sliderValue = parameter.sliderValue;
+    try {
+      const value = parseTuningValue(parameter, draft);
+      sliderValue = Math.round((value - parameter.minimum) / parameter.step);
+    } catch {
+      // Preserve intermediate text such as "-" or an empty field; validate on send.
+    }
+    this.updateTuningParameter(id, { draft, sliderValue, status: '已编辑 · 未发送' });
+    this.setData({ tuningMessage: '' });
+  },
+  onTuningSliderChange(event: ValueEvent) {
+    const id = String(event.currentTarget.dataset.id || '');
+    const parameter = this.findTuningParameter(id);
+    const sliderValue = Number(event.detail.value);
+    if (
+      !parameter ||
+      parameter.unavailable ||
+      this.data.tuningBusy === id ||
+      !Number.isInteger(sliderValue) ||
+      sliderValue < 0 ||
+      sliderValue > parameter.sliderMaximum
+    )
+      return;
+    // Native slider values are integer ticks; convert only at the UI boundary.
+    const draft = (parameter.minimum + sliderValue * parameter.step).toFixed(parameter.digits);
+    this.updateTuningParameter(id, { draft, sliderValue, status: '已编辑 · 未发送' });
+    this.setData({ tuningMessage: '' });
+  },
+  sendTuningParameter(event: WechatMiniprogram.BaseEvent) {
+    const id = String(event.currentTarget.dataset.id || '');
+    const parameter = this.findTuningParameter(id);
+    if (!parameter || parameter.unavailable) return;
+    void this.performTuning(id, async () => {
+      const value = parseTuningValue(parameter, parameter.draft);
+      this.updateTuningParameter(id, { draft: value.toFixed(parameter.digits) });
+      await this.controller!.sendTuning(id, String(value));
+    });
+  },
+  restoreAutoAngleKp() {
+    void this.performTuning('angle-auto', () => this.controller!.restoreAutoAngleKp());
+  },
+  async performTuning(id: string, action: () => Promise<void>) {
+    if (
+      this.destroyed ||
+      !this.visible ||
+      this.data.busy ||
+      this.data.tuningBusy ||
+      !this.controller
+    )
+      return;
+    if (!this.data.ready) {
+      this.setData({ tuningMessage: '请先连接设备或启用模拟' });
+      return;
+    }
+    const epoch = this.tuningEpoch;
+    this.setData({ tuningBusy: id, tuningMessage: '' });
+    try {
+      await action();
+      if (this.destroyed || epoch !== this.tuningEpoch) return;
+      const status = this.data.demo ? '模拟发送 · 未写入设备' : '已发送 · 未确认执行';
+      this.updateTuningParameter(id === 'angle-auto' ? 'angle-p' : id, {
+        status: id === 'angle-auto' ? `自动 Kp ${status}` : status,
+      });
+      this.setData({ tuningMessage: id === 'angle-auto' ? `自动 Kp ${status}` : status });
+    } catch (error) {
+      if (this.destroyed || epoch !== this.tuningEpoch) return;
+      const message = error instanceof Error ? error.message : '参数发送失败';
+      this.updateTuningParameter(id, { status: '未完成发送' });
+      this.setData({ tuningMessage: message });
+      this.addLog('ERR', message);
+    } finally {
+      if (!this.destroyed && epoch === this.tuningEpoch) this.setData({ tuningBusy: '' });
+    }
   },
   clearLogs() {
     this.setData({ logs: [] });

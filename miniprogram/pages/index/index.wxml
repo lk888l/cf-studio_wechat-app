@@ -78,57 +78,165 @@
         >
       </view>
 
-      <view class="instrument-panel">
-        <view class="instrument-heading"
-          ><text>控制目标</text
-          ><text class="screen-badge"
-            >{{demo ? 'SIM' : (profileIndex === 0 ? 'MAIN' : '待验证')}}</text
-          ></view
+      <view class="instrument-panel {{panelModeIndex === 1 ? 'tuning-panel' : ''}}">
+        <view
+          class="arming-control panel-mode-control {{panelModeIndex === 1 ? 'panel-mode-active' : ''}}"
         >
-        <view class="target-grid">
-          <view class="target-cell"
-            ><text class="target-label">行进速度</text
-            ><view class="target-reading"
-              ><text class="target-value">{{control.speed}}</text
-              ><text class="target-unit">RPM</text></view
-            ></view
-          >
-          <view class="target-cell"
-            ><text class="target-label">转向目标</text
-            ><view class="target-reading"
-              ><text class="target-value">{{control.turn}}</text
-              ><text class="target-unit">RPM</text></view
-            ></view
-          >
-          <view class="target-cell"
-            ><text class="target-label">机身高度</text
-            ><view class="target-reading"
-              ><text class="target-value">{{control.height}}</text
-              ><text class="target-unit">mm</text></view
-            ></view
-          >
-          <view class="target-cell"
-            ><text class="target-label">左右横滚</text
-            ><view class="target-reading"
-              ><text class="target-value">{{control.roll > 0 ? '+' : ''}}{{control.roll}}</text
-              ><text class="target-unit">°</text></view
-            ></view
-          >
+          <view class="panel-mode-labels">
+            <text class="arming-label">运动参数调节</text>
+            <text class="arming-state"
+              >{{panelModeIndex === 1 ? '开启 · 滑块 / 输入' : '关闭 · 运行参数回显'}}</text
+            >
+          </view>
+          <switch
+            class="arm-switch"
+            checked="{{panelModeIndex === 1}}"
+            color="#458dcc"
+            bindchange="onPanelModeChange"
+            aria-label="运动参数调节，关闭时显示运行参数"
+          />
         </view>
-        <view class="feedback-strip">
-          <block wx:if="{{lastReceive}}"
-            ><view class="feedback-heading"
-              ><text>RX 原文 · {{receiveCount}}</text><text>{{lastReceiveAt}}</text></view
-            ><text class="feedback-value" selectable>{{lastReceive}}</text></block
+        <block wx:if="{{panelModeIndex === 0}}">
+          <view class="target-grid">
+            <view class="target-cell"
+              ><text class="target-label">行进速度</text
+              ><view class="target-reading"
+                ><text class="target-value">{{control.speed}}</text
+                ><text class="target-unit">RPM</text></view
+              ></view
+            >
+            <view class="target-cell"
+              ><text class="target-label">转向目标</text
+              ><view class="target-reading"
+                ><text class="target-value">{{control.turn}}</text
+                ><text class="target-unit">RPM</text></view
+              ></view
+            >
+            <view class="target-cell"
+              ><text class="target-label">机身高度</text
+              ><view class="target-reading"
+                ><text class="target-value">{{control.height}}</text
+                ><text class="target-unit">mm</text></view
+              ></view
+            >
+            <view class="target-cell"
+              ><text class="target-label">左右横滚</text
+              ><view class="target-reading"
+                ><text class="target-value">{{control.roll > 0 ? '+' : ''}}{{control.roll}}</text
+                ><text class="target-unit">°</text></view
+              ></view
+            >
+          </view>
+          <view class="feedback-strip">
+            <block wx:if="{{lastReceive}}"
+              ><view class="feedback-heading"
+                ><text>RX 原文 · {{receiveCount}}</text><text>{{lastReceiveAt}}</text></view
+              ><text class="feedback-value" selectable>{{lastReceive}}</text></block
+            >
+            <block wx:else
+              ><text class="feedback-empty">设备实测：尚无结构化回传</text
+              ><text class="feedback-note"
+                >{{demo ? '模拟模式 · 不发送真实指令' : '当前数值为指令目标'}}</text
+              ></block
+            >
+          </view>
+        </block>
+        <block wx:else>
+          <picker
+            class="tuning-group-picker"
+            range="{{tuningGroups}}"
+            range-key="name"
+            value="{{tuningGroupIndex}}"
+            bindchange="onTuningGroupChange"
+            aria-label="选择运动参数分组"
           >
-          <block wx:else
-            ><text class="feedback-empty">设备实测：尚无结构化回传</text
-            ><text class="feedback-note"
-              >{{demo ? '模拟模式 · 不发送真实指令' : '当前数值为指令目标'}}</text
-            ></block
-          >
-        </view>
-        <view class="command-strip"
+            <view class="tuning-group-heading"
+              ><text>{{tuningGroups[tuningGroupIndex].name}}</text
+              ><text>{{tuningGroupIndex + 1}} / {{tuningGroups.length}} ⌄</text></view
+            >
+          </picker>
+          <scroll-view class="tuning-scroll" scroll-y enhanced show-scrollbar="{{true}}">
+            <view
+              wx:for="{{tuningGroups[tuningGroupIndex].parameters}}"
+              wx:key="id"
+              class="tuning-row"
+            >
+              <view class="tuning-row-heading"
+                ><text>{{item.label}}</text
+                ><text wx:if="{{!item.unavailable}}" class="tuning-step"
+                  >步长 {{item.step}}</text
+                ></view
+              >
+              <text wx:if="{{item.unavailable}}" class="tuning-unavailable"
+                >{{item.unavailable}}</text
+              >
+              <block wx:else>
+                <view class="tuning-editor">
+                  <input
+                    class="tuning-input"
+                    type="{{item.minimum < 0 ? 'text' : 'digit'}}"
+                    value="{{item.draft}}"
+                    maxlength="12"
+                    data-id="{{item.id}}"
+                    bindinput="onTuningInput"
+                    bindconfirm="sendTuningParameter"
+                    confirm-type="send"
+                    placeholder="输入数值"
+                    disabled="{{tuningBusy === item.id}}"
+                    adjust-position="{{true}}"
+                    cursor-spacing="24"
+                    always-embed="{{true}}"
+                    aria-label="{{item.label}}，{{item.minimum}}至{{item.maximum}}"
+                  />
+                  <button
+                    class="tuning-send"
+                    data-id="{{item.id}}"
+                    bindtap="sendTuningParameter"
+                    disabled="{{!ready || busy || tuningBusy}}"
+                  >
+                    {{tuningBusy === item.id ? '发送中' : '发送'}}
+                  </button>
+                </view>
+                <slider
+                  class="tuning-slider"
+                  min="0"
+                  max="{{item.sliderMaximum}}"
+                  step="1"
+                  value="{{item.sliderValue}}"
+                  data-id="{{item.id}}"
+                  bindchanging="onTuningSliderChange"
+                  bindchange="onTuningSliderChange"
+                  disabled="{{tuningBusy === item.id}}"
+                  block-size="18"
+                  block-color="#458dcc"
+                  activeColor="#458dcc"
+                  backgroundColor="#b8d6f1"
+                  aria-label="滑动调整{{item.label}}"
+                />
+                <view class="tuning-range"
+                  ><text>{{item.minimum}}</text><text>{{item.maximum}}</text></view
+                >
+                <text class="tuning-row-status">{{item.status}}</text>
+              </block>
+            </view>
+            <button
+              wx:if="{{profileIndex === 1 && tuningGroupIndex === 1}}"
+              class="tuning-auto"
+              bindtap="restoreAutoAngleKp"
+              disabled="{{!ready || busy || tuningBusy}}"
+            >
+              恢复自动 Kp
+            </button>
+            <text class="tuning-note">{{tuningGroups[tuningGroupIndex].note}}</text>
+          </scroll-view>
+          <view class="tuning-footer">
+            <text class="tuning-message" wx:if="{{tuningMessage}}">{{tuningMessage}}</text>
+            <text wx:else
+              >{{ready ? '拖动或输入后点发送 · 下滑查看更多' : '可编辑 · 连接或模拟后发送'}}</text
+            >
+          </view>
+        </block>
+        <view wx:if="{{panelModeIndex === 0}}" class="command-strip"
           ><text class="command-count">{{demo ? 'SIM' : 'TX'}} {{sentCount}}</text
           ><text class="command-frame" selectable>{{lastFrame || '等待控制指令'}}</text></view
         >

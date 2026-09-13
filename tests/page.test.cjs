@@ -54,6 +54,8 @@ function fixture(t, overrides = {}) {
       success(options);
     },
     setClipboardData: success,
+    getStorageSync: () => '',
+    setStorageSync: () => undefined,
     ...overrides,
   };
   for (const name of [
@@ -78,7 +80,12 @@ function fixture(t, overrides = {}) {
     data: structuredClone(definition.data),
     subscriptions: [],
     setData(update) {
-      Object.assign(this.data, structuredClone(update));
+      for (const [key, value] of Object.entries(structuredClone(update))) {
+        const segments = key.replace(/\[(\d+)\]/g, '.$1').split('.');
+        let target = this.data;
+        for (const segment of segments.slice(0, -1)) target = target[segment];
+        target[segments.at(-1)] = value;
+      }
     },
     createSelectorQuery() {
       let callback;
@@ -151,6 +158,171 @@ function fixture(t, overrides = {}) {
   });
   return f;
 }
+
+const tuningInput = (id, value) => ({ currentTarget: { dataset: { id } }, detail: { value } });
+
+test('center panel defaults to instruments and persists only its mode and parameter group', async (t) => {
+  const saved = [];
+  const f = fixture(t, { setStorageSync: (key, value) => saved.push({ key, value }) });
+  assert.equal(f.page.data.panelModeIndex, 0);
+  f.page.onPanelModeChange({ detail: { value: true } });
+  assert.equal(f.page.data.panelModeIndex, 1);
+  f.page.onTuningGroupChange({ detail: { value: '2' } });
+  f.page.onTuningInput(tuningInput('velocity-p', '0.06'));
+  assert.deepEqual(saved.at(-1), { key: 'wl1-control-panel-v1', value: { mode: 1, group: 2 } });
+  f.page.onPanelModeChange({ detail: { value: false } });
+  assert.equal(f.page.data.panelModeIndex, 0);
+  f.page.onPanelModeChange({ detail: { value: true } });
+  assert.equal(f.page.findTuningParameter('velocity-p').draft, '0.06');
+  assert.deepEqual(f.calls.writes, []);
+});
+
+test('stored panel preferences restore without sending reference parameters', async (t) => {
+  const f = fixture(t, { getStorageSync: () => ({ mode: 1, group: 4 }) });
+  assert.equal(f.page.data.panelModeIndex, 1);
+  assert.equal(f.page.data.tuningGroupIndex, 4);
+  assert.equal(f.page.findTuningParameter('roll-i').status, '固件参考值 · 未发送');
+  await f.connected();
+  assert.deepEqual(f.calls.writes, []);
+});
+
+test('tuning slider and input stay synchronized and send only on tap while demo remains isolated', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  await f.move();
+  const { speed, turn } = f.page.data.control;
+  f.page.onTuningInput(tuningInput('velocity-i', '0.008'));
+  assert.equal(f.page.findTuningParameter('velocity-i').sliderValue, 8);
+  f.page.onTuningSliderChange(tuningInput('velocity-i', 9));
+  assert.equal(f.page.findTuningParameter('velocity-i').draft, '0.009');
+  assert.ok(!f.page.data.logs.some((log) => log.text.startsWith('velocitypid')));
+  f.page.sendTuningParameter(datasetEvent({ id: 'velocity-i' }));
+  await flush();
+  assert.ok(
+    f.page.data.logs.some((log) => log.direction === 'SIM' && log.text === 'velocitypid -i 0.009'),
+  );
+  assert.equal(f.page.findTuningParameter('velocity-i').status, '模拟发送 · 未写入设备');
+  assert.equal(f.page.data.armed, true);
+  assert.equal(f.page.data.control.speed, speed);
+  assert.equal(f.page.data.control.turn, turn);
+  assert.deepEqual(f.calls.writes, []);
+});
+
+test('slider endpoints, negative values and decimal steps map to precise sendable values', async (t) => {
+  const f = fixture(t);
+  await f.connected();
+  const bias = () => f.page.findTuningParameter('angle-bias');
+  assert.equal(bias().sliderMaximum, 400);
+  assert.equal(bias().sliderValue, 326);
+  f.page.onTuningSliderChange(tuningInput('angle-bias', 0));
+  assert.equal(bias().draft, '-20.0');
+  f.page.onTuningSliderChange(tuningInput('angle-bias', 400));
+  assert.equal(bias().draft, '20.0');
+  f.page.onTuningSliderChange(tuningInput('angle-bias', 146));
+  assert.equal(bias().draft, '-5.4');
+  f.page.onTuningSliderChange(tuningInput('velocity-i', 9999));
+  assert.equal(f.page.findTuningParameter('velocity-i').draft, '9.999');
+  for (const value of [-1, 401, 3.2, NaN])
+    f.page.onTuningSliderChange(tuningInput('angle-bias', value));
+  assert.equal(bias().draft, '-5.4');
+  assert.deepEqual(f.calls.writes, []);
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
+  await f.advance();
+  assert.deepEqual(
+    f.calls.writes.map((write) => write.text),
+    ['anglebias -5.4'],
+  );
+});
+
+test('input preserves partial edits without resetting the slider and recovers after invalid text', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  const bias = () => f.page.findTuningParameter('angle-bias');
+  const sliderValue = bias().sliderValue;
+  for (const draft of ['', '-', '.', '21', '0.001']) {
+    f.page.onTuningInput(tuningInput('angle-bias', draft));
+    assert.equal(bias().draft, draft);
+    assert.equal(bias().sliderValue, sliderValue);
+  }
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
+  await flush();
+  assert.match(f.page.data.tuningMessage, /小数/);
+  f.page.onTuningInput(tuningInput('angle-bias', '-0.4'));
+  assert.equal(bias().sliderValue, 196);
+  assert.equal(f.page.data.tuningMessage, '');
+  f.page.onTuningSliderChange(tuningInput('angle-bias', 201));
+  assert.equal(bias().draft, '0.1');
+  assert.deepEqual(f.calls.writes, []);
+});
+
+test('slider cannot modify unsupported parameters or an active send, and other drafts remain editable', async (t) => {
+  let pendingWrite;
+  const f = fixture(t, {
+    writeBLECharacteristicValue: (options) => {
+      pendingWrite = options;
+    },
+  });
+  await f.connected();
+  f.page.sendTuningParameter(datasetEvent({ id: 'velocity-i' }));
+  await flush();
+  assert.equal(f.page.data.tuningBusy, 'velocity-i');
+  f.page.onTuningSliderChange(tuningInput('velocity-i', 10));
+  f.page.onTuningInput(tuningInput('velocity-i', '0.011'));
+  f.page.onTuningSliderChange(tuningInput('roll-p', 1001));
+  f.page.onTuningInput(tuningInput('angle-bias', '-1.2'));
+  assert.equal(f.page.findTuningParameter('velocity-i').draft, '0.008');
+  assert.equal(f.page.findTuningParameter('roll-p').draft, '0.0');
+  assert.equal(f.page.findTuningParameter('angle-bias').sliderValue, 188);
+  pendingWrite.success({ errMsg: 'ok' });
+  await flush();
+  assert.equal(f.page.data.tuningBusy, '');
+});
+
+test('page sends one real tuning command, reports only sent and resets drafts when disconnected', async (t) => {
+  const f = fixture(t);
+  await f.connected();
+  f.page.onTuningInput(tuningInput('angle-bias', '13.1'));
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
+  await f.advance();
+  assert.deepEqual(
+    f.calls.writes.map((write) => write.text),
+    ['anglebias 13.1'],
+  );
+  assert.equal(f.page.findTuningParameter('angle-bias').status, '已发送 · 未确认执行');
+  f.emit('BLEConnectionStateChange', { deviceId: 'robot', connected: false });
+  assert.equal(f.page.findTuningParameter('angle-bias').draft, '12.6');
+  assert.equal(f.page.findTuningParameter('angle-bias').status, '固件参考值 · 未发送');
+});
+
+test('invalid tuning and unsupported main gains never reach BLE', async (t) => {
+  const f = fixture(t);
+  await f.connected();
+  f.page.onTuningInput(tuningInput('angle-bias', '21'));
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
+  await flush();
+  assert.match(f.page.data.tuningMessage, /范围/);
+  f.page.sendTuningParameter(datasetEvent({ id: 'roll-p' }));
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-p' }));
+  assert.deepEqual(f.calls.writes, []);
+});
+
+test('SoftEngine profile exposes manual and auto Kp with framed commands and its own reference bias', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  f.page.onTuningInput(tuningInput('angle-bias', '13.1'));
+  f.page.onProfileChange({ detail: { value: 1 } });
+  await flush();
+  assert.equal(f.page.findTuningParameter('angle-bias').draft, '7.0');
+  assert.equal(f.page.findTuningParameter('angle-p').unavailable, '');
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-p' }));
+  await flush();
+  f.page.restoreAutoAngleKp();
+  await flush();
+  assert.ok(f.page.data.logs.some((log) => log.text === '@anglepid -p 70\n'));
+  assert.ok(f.page.data.logs.some((log) => log.text === '@anglepid -auto\n'));
+  assert.deepEqual(f.calls.writes, []);
+});
 
 test('page demo mode exercises real controls without connecting, scanning or writing BLE', async (t) => {
   const f = fixture(t);

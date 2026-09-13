@@ -83,6 +83,96 @@ function delayedController(t) {
   return { controller, timing, calls, maximumActive: () => maximumActive };
 }
 
+test('runtime tuning serializes with motion, keeps newest targets and rejects extra tuning requests', async (t) => {
+  const { controller, timing, calls, maximumActive } = delayedController(t);
+  controller.setReady(true);
+  controller.arm();
+  controller.beginHold();
+  const tuning = controller.sendTuning('velocity-i', '0.009');
+  await assert.rejects(controller.sendTuning('roll-i', '-0.5'), /等待/);
+  controller.move(40, 5);
+  timing.advance(100);
+  calls[0].resolve();
+  await flush();
+  assert.equal(calls[1].frame, 'velocitypid -i 0.009');
+  controller.move(60, 8);
+  timing.advance(100);
+  calls[1].resolve();
+  await tuning;
+  await flush();
+  assert.equal(calls[2].frame, 'R 8 -60 0 44.5');
+  assert.equal(maximumActive(), 1);
+  assert.equal(controller.snapshot().armed, true);
+  calls[2].resolve();
+  await flush();
+});
+
+test('release motion takes priority over waiting tuning without losing the parameter', async (t) => {
+  const { controller, calls } = delayedController(t);
+  controller.setReady(true);
+  controller.arm();
+  const tuning = controller.sendTuning('angle-bias', '12.7');
+  controller.releaseMotion();
+  calls[0].resolve();
+  await flush();
+  assert.equal(calls[1].frame, neutralFrame);
+  calls[1].resolve();
+  await flush();
+  assert.equal(calls[2].frame, 'anglebias 12.7');
+  calls[2].resolve();
+  await tuning;
+});
+
+test('stop cancels queued tuning and sends neutral next', async (t) => {
+  const { controller, calls } = delayedController(t);
+  controller.setReady(true);
+  controller.arm();
+  const cancelled = assert.rejects(controller.sendTuning('angle-bias', '12.7'), /取消/);
+  const stopping = controller.stop();
+  await cancelled;
+  calls[0].resolve();
+  await flush();
+  assert.equal(calls[1].frame, neutralFrame);
+  calls[1].resolve();
+  await stopping;
+  assert.equal(calls.length, 2);
+});
+
+test('stop during active tuning waits for its write then neutral; reconnect cannot report stale success', async (t) => {
+  const { controller, calls } = delayedController(t);
+  controller.setReady(true);
+  const tuning = controller.sendTuning('roll-i', '-0.5');
+  const stopping = controller.stop();
+  assert.equal(calls.length, 1);
+  calls[0].resolve();
+  await tuning;
+  await flush();
+  assert.equal(calls[1].frame, neutralFrame);
+  calls[1].resolve();
+  await stopping;
+  const stale = assert.rejects(controller.sendTuning('roll-i', '-0.6'), /连接已切换/);
+  controller.setReady(false);
+  controller.setReady(true);
+  calls[2].resolve();
+  await stale;
+  assert.equal(controller.snapshot().lastFrame, neutralFrame);
+});
+
+test('tuning write failure stops motion and rejects disconnected tuning', async (t) => {
+  const { controller, timing, calls } = delayedController(t);
+  controller.setReady(true);
+  controller.arm();
+  calls[0].resolve();
+  await flush();
+  const failed = assert.rejects(controller.sendTuning('roll-i', '-0.5'), /write failed/);
+  calls[1].reject(new Error('write failed'));
+  await failed;
+  assert.equal(controller.snapshot().armed, false);
+  timing.advance(500);
+  await assert.rejects(controller.sendTuning('roll-i', '-0.6'), /连接/);
+  assert.equal(calls.length, 2);
+});
+
 test('arming requires a ready, explicitly supported device and starts with neutral', async (t) => {
   const { controller, frames } = immediateController(t);
   assert.throws(() => controller.arm());
