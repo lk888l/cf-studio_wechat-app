@@ -79,20 +79,23 @@
 .topbar-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 5px;
   margin-left: auto;
 }
 .nav-button {
   padding: 6px 10px;
+  border: 1px solid var(--accent);
   border-radius: 5px;
-  background: transparent;
-  color: var(--text);
+  background: var(--surface);
+  color: #275d90;
   font-size: 10px;
+  font-weight: 600;
   white-space: nowrap;
 }
 .nav-active {
-  color: var(--text-strong);
-  background: var(--surface-tint);
+  border-color: #275d90;
+  color: #ffffff;
+  background: #275d90;
 }
 .demo-control {
   display: flex;
@@ -388,10 +391,10 @@
   font-size: 8px;
 }
 .tuning-editor {
-  display: grid;
-  grid-template-columns: minmax(60px, 1fr) 42px;
+  display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   width: 100%;
 }
 .tuning-send,
@@ -408,21 +411,29 @@
 }
 .tuning-input {
   box-sizing: border-box;
-  min-width: 60px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
+  width: 0;
   height: 32px;
-  padding: 0 6px;
+  padding: 0 4px;
   border: 1px solid var(--panel-badge);
   border-radius: 4px;
   background: var(--surface);
   color: var(--panel-value);
   font-family: Consolas, monospace;
-  font-size: 13px;
+  font-size: 12px;
   text-align: center;
 }
 .tuning-send {
-  width: 42px;
-  font-size: 10px;
+  flex: 0 0 64px;
+  min-width: 64px;
+  width: 64px;
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
   background: var(--accent-soft);
 }
 .tuning-auto {
@@ -807,17 +818,6 @@
   font-weight: 650;
   letter-spacing: -0.6px;
 }
-.profile-picker {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface-tint);
-  color: var(--text);
-  font-size: 10px;
-}
 .error-notice {
   margin-bottom: 13px;
   padding: 11px 13px;
@@ -869,6 +869,28 @@
   grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
   gap: 15px;
   align-items: start;
+}
+.target-device-panel {
+  margin-bottom: 14px;
+}
+.target-device-name {
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-tint);
+  color: var(--text-strong);
+  font-family: monospace;
+  font-size: 16px;
+  font-weight: 600;
+  word-break: break-all;
+}
+.target-device-hint {
+  display: block;
+  margin: 12px 0 6px;
+  color: var(--text-strong);
+  font-size: 11px;
+  line-height: 1.7;
+  word-break: break-word;
 }
 .panel {
   padding: 17px;

@@ -1,5 +1,5 @@
 import { RemoteController } from '../../control/controller';
-import { deviceProfiles, joystickVector, legJoystickVector, wl1Main } from '../../devices/profiles';
+import { joystickVector, legJoystickVector, wl1Main } from '../../devices/profiles';
 import { parseTuningValue, tuningGroups } from '../../devices/tuning';
 import { onBackground } from '../../services/lifecycle';
 import { ParameterService, ParameterSnapshot } from '../../services/parameters';
@@ -73,8 +73,7 @@ Page({
     error: '',
     logs: [] as LogEntry[],
     helpOpen: false,
-    profileNames: ['WL1 · main（已适配）', 'WL1 · SoftEngine（串口适配）'],
-    profileIndex: 0,
+    targetBluetoothName: 'D30SP_126BB2',
     panelModeIndex: 0,
     tuningGroupIndex: 0,
     tuningGroups: createTuningGroups(wl1Main.id),
@@ -163,9 +162,7 @@ Page({
       this.transport.subscribe((ble) => {
         if (this.destroyed) return;
         const ready =
-          this.visible &&
-          deviceProfiles[this.data.profileIndex].supported &&
-          (this.data.demo || ble.status === 'ready');
+          this.visible && wl1Main.supported && (this.data.demo || ble.status === 'ready');
         if (ble.deviceId !== this.data.ble.deviceId) {
           this.setData({ lastReceive: '', lastReceiveAt: '', receiveCount: 0 });
         }
@@ -212,7 +209,7 @@ Page({
   onShow() {
     this.visible = true;
     if (this.data.demo && !this.suspension) {
-      const ready = deviceProfiles[this.data.profileIndex].supported;
+      const ready = wl1Main.supported;
       this.controller?.setReady(ready);
       this.setData({ ready });
     }
@@ -259,8 +256,7 @@ Page({
       .finally(() => {
         this.suspension = null;
         if (!this.destroyed) {
-          const ready =
-            this.visible && this.data.demo && deviceProfiles[this.data.profileIndex].supported;
+          const ready = this.visible && this.data.demo && wl1Main.supported;
           this.controller?.setReady(ready);
           this.setData({ busy: false, ready });
         }
@@ -309,7 +305,7 @@ Page({
       this.controller?.setReady(false);
       if (!this.visible || this.destroyed) return;
       const demo = !this.data.demo;
-      const ready = demo && deviceProfiles[this.data.profileIndex].supported;
+      const ready = demo && wl1Main.supported;
       this.setData({
         demo,
         ready,
@@ -528,31 +524,10 @@ Page({
     this.onLegJoystickEnd();
     this.controller?.pose(wl1Main.initial.height, 0);
   },
-  onProfileChange(event: ValueEvent) {
-    const index = Number(event.detail.value);
-    if (!deviceProfiles[index] || this.data.busy) return;
-    void this.perform(async () => {
-      await this.controller?.stop();
-      if (!this.visible || this.destroyed) return;
-      this.controller?.setProfile(deviceProfiles[index]);
-      const ready =
-        deviceProfiles[index].supported && (this.data.demo || this.data.ble.status === 'ready');
-      this.controller?.setReady(ready);
-      this.setData({
-        profileIndex: index,
-        ready,
-        error: '',
-      });
-      this.resetTuning();
-      this.resetParameters();
-      this.updateParameterAvailability();
-    });
-  },
-
   resetTuning() {
     this.tuningEpoch += 1;
     this.setData({
-      tuningGroups: createTuningGroups(deviceProfiles[this.data.profileIndex].id),
+      tuningGroups: createTuningGroups(wl1Main.id),
       tuningBusy: '',
       tuningMessage: '',
     });
@@ -644,9 +619,6 @@ Page({
       this.updateTuningParameter(id, { draft: value.toFixed(parameter.digits) });
       await this.controller!.sendTuning(id, String(value));
     });
-  },
-  restoreAutoAngleKp() {
-    void this.performTuning('angle-auto', () => this.controller!.restoreAutoAngleKp());
   },
   async performTuning(id: string, action: () => Promise<void>) {
     if (

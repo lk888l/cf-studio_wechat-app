@@ -160,6 +160,35 @@ function fixture(t, overrides = {}) {
   return f;
 }
 
+test('ZX-D30 connection is ready for control without manual endpoint selection', async (t) => {
+  const f = fixture(t, {
+    getBLEDeviceServices(options) {
+      options.success({ services: [{ uuid: 'FFE0' }] });
+    },
+    getBLEDeviceCharacteristics(options) {
+      options.success({
+        characteristics: [
+          { uuid: 'FFE1', properties: { write: true, notify: true } },
+          { uuid: 'FFE2', properties: { write: true } },
+        ],
+      });
+    },
+  });
+  f.page.connectDevice(datasetEvent({ id: 'robot' }));
+  await flush();
+  assert.equal(f.page.data.ble.status, 'ready');
+  assert.equal(f.page.data.ble.endpoint.writeId, 'FFE2');
+  assert.equal(f.page.data.ready, true);
+  assert.equal(f.page.data.busy, false);
+  assert.equal(f.page.data.armed, false);
+  await f.move();
+  assert.ok(f.calls.writes.length > 0);
+  assert.ok(f.calls.writes.every((write) => write.options.characteristicId === 'FFE2'));
+  assert.ok(
+    f.calls.writes.every((write) => write.text.startsWith('R ') && !write.text.endsWith('\n')),
+  );
+});
+
 const tuningInput = (id, value) => ({ currentTarget: { dataset: { id } }, detail: { value } });
 
 function receiveParameters(f, text) {
@@ -171,15 +200,13 @@ function receiveParameters(f, text) {
   });
 }
 const disarmedParameters = 'params: flash_valid=true unsaved=true armed=false enabled=false\n';
-async function connectedSoftEngine(f) {
+async function connectedMain(f) {
   await f.connected();
-  f.page.onProfileChange({ detail: { value: 1 } });
-  await f.advance();
   assert.equal(f.page.data.parameterAvailable, true);
 }
 test('page save immediately writes save without opening a panel, querying or confirming', async (t) => {
   const f = fixture(t);
-  await connectedSoftEngine(f);
+  await connectedMain(f);
   f.api.showModal = () => assert.fail('save must not show a confirmation');
   const before = f.calls.writes.length;
   // Dispatch the real primary button binding, so a modal-only entry cannot regress.
@@ -216,7 +243,7 @@ test('page save immediately writes save without opening a panel, querying or con
 for (const changedOneParameter of [false, true]) {
   test(`page directly saves car parameters after sending ${changedOneParameter ? 'only one item' : 'no items'}`, async (t) => {
     const f = fixture(t);
-    await connectedSoftEngine(f);
+    await connectedMain(f);
     if (changedOneParameter) {
       const beforeTuning = f.calls.writes.length;
       f.page.onTuningInput(tuningInput('velocity-i', '0.009'));
@@ -227,7 +254,7 @@ for (const changedOneParameter of [false, true]) {
           .slice(beforeTuning)
           .map((write) => write.text)
           .join(''),
-        '@velocitypid -i 0.009\n',
+        'velocitypid -i 0.009',
       );
       // An unfinished draft must not block saving values already on the car.
       f.page.onTuningInput(tuningInput('angle-bias', '-'));
@@ -251,7 +278,7 @@ for (const changedOneParameter of [false, true]) {
 for (const result of ['ok (all motion parameters)', 'unchanged (no flash write)']) {
   test(`runtime save ${result} keeps both joysticks and periodic BLE motion active`, async (t) => {
     const f = fixture(t);
-    await connectedSoftEngine(f);
+    await connectedMain(f);
     await f.move();
     f.page.onLegJoystickStart(touchEvent([legTouch(8)]));
     const target = { ...f.page.data.control };
@@ -279,7 +306,7 @@ for (const result of ['ok (all motion parameters)', 'unchanged (no flash write)'
       f.calls.writes.length >= afterSave + 5,
       'motion keeps refreshing while save is pending',
     );
-    assert.ok(f.calls.writes.slice(afterSave).every((write) => write.text.startsWith('@R ')));
+    assert.ok(f.calls.writes.slice(afterSave).every((write) => write.text.startsWith('R ')));
     assert.equal(f.page.data.parameters.busy, 'save');
     f.page.onJoystickMove(touchEvent([touch(7, 100, 164)]));
     f.page.onLegJoystickMove(touchEvent([legTouch(8, 436, 100)]));
@@ -300,7 +327,7 @@ for (const result of ['ok (all motion parameters)', 'unchanged (no flash write)'
     assert.deepEqual(
       f.calls.writes
         .slice(before)
-        .filter((write) => !write.text.startsWith('@R '))
+        .filter((write) => !write.text.startsWith('R '))
         .map((write) => write.text),
       ['save\n'],
     );
@@ -317,7 +344,7 @@ test('page closes firmware control only after support confirmation and checks pa
       modal = options;
     },
   });
-  await connectedSoftEngine(f);
+  await connectedMain(f);
   f.page.toggleArmed();
   await f.advance();
   const off = f.page.disableFirmwareControl();
@@ -350,7 +377,7 @@ test('page closes firmware control only after support confirmation and checks pa
 
 test('cancelled support confirmation sends no firmware command', async (t) => {
   const f = fixture(t);
-  await connectedSoftEngine(f);
+  await connectedMain(f);
   const before = f.calls.writes.length;
   await f.page.disableFirmwareControl();
   assert.equal(f.calls.writes.length, before);
@@ -359,7 +386,7 @@ test('cancelled support confirmation sends no firmware command', async (t) => {
 
 test('save timeout and late BLE reply never report page success', async (t) => {
   const f = fixture(t);
-  await connectedSoftEngine(f);
+  await connectedMain(f);
   f.page.saveParameters();
   await f.advance();
   await f.advance(5000);
@@ -370,15 +397,14 @@ test('save timeout and late BLE reply never report page success', async (t) => {
   assert.equal(f.page.data.parameters.success, false);
 });
 
-for (const action of ['disconnect', 'background', 'profile']) {
+for (const action of ['disconnect', 'background']) {
   test(`page ${action} cancels waiting for save and rejects its late result`, async (t) => {
     const f = fixture(t);
-    await connectedSoftEngine(f);
+    await connectedMain(f);
     f.page.saveParameters();
     await f.advance();
     if (action === 'disconnect') f.page.disconnectDevice();
     if (action === 'background') f.page.onHide();
-    if (action === 'profile') f.page.onProfileChange({ detail: { value: 0 } });
     for (let index = 0; index < 4; index++) await f.advance();
     receiveParameters(f, 'save: ok\n');
     await flush();
@@ -388,7 +414,7 @@ for (const action of ['disconnect', 'background', 'profile']) {
   });
 }
 
-test('save has no profile or notification gate; missing replies time out and SIM stays isolated', async (t) => {
+test('main save has no notification gate; missing replies time out and SIM stays isolated', async (t) => {
   const f = fixture(t, {
     notifyBLECharacteristicValueChange: (options) => options.fail({ errCode: 10007 }),
   });
@@ -403,9 +429,6 @@ test('save has no profile or notification gate; missing replies time out and SIM
   await f.advance(5000);
   assert.equal(f.page.data.parameters.message, '未收到保存结果');
   assert.equal(f.page.data.parameters.success, false);
-  f.page.onProfileChange({ detail: { value: 1 } });
-  await f.advance();
-  assert.equal(f.page.data.parameterAvailable, true);
   await f.demo();
   assert.equal(f.page.data.parameterAvailable, false);
   f.page.saveParameters();
@@ -564,21 +587,24 @@ test('invalid tuning and unsupported main gains never reach BLE', async (t) => {
   assert.deepEqual(f.calls.writes, []);
 });
 
-test('SoftEngine profile exposes manual and auto Kp with framed commands and its own reference bias', async (t) => {
+test('main tuning stays fixed across demo and connection changes', async (t) => {
   const f = fixture(t);
   await f.demo();
+  assert.equal(f.page.findTuningParameter('angle-bias').draft, '12.6');
+  assert.ok(f.page.findTuningParameter('angle-p').unavailable);
   f.page.onTuningInput(tuningInput('angle-bias', '13.1'));
-  f.page.onProfileChange({ detail: { value: 1 } });
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
   await flush();
-  assert.equal(f.page.findTuningParameter('angle-bias').draft, '7.0');
-  assert.equal(f.page.findTuningParameter('angle-p').unavailable, '');
-  f.page.sendTuningParameter(datasetEvent({ id: 'angle-p' }));
-  await flush();
-  f.page.restoreAutoAngleKp();
-  await flush();
-  assert.ok(f.page.data.logs.some((log) => log.text === '@anglepid -p 70\n'));
-  assert.ok(f.page.data.logs.some((log) => log.text === '@anglepid -auto\n'));
+  assert.ok(f.page.data.logs.some((log) => log.text === 'anglebias 13.1'));
   assert.deepEqual(f.calls.writes, []);
+  f.page.toggleDemo();
+  await flush();
+  await f.connected();
+  assert.equal(f.page.findTuningParameter('angle-bias').draft, '12.6');
+  assert.ok(f.page.findTuningParameter('angle-p').unavailable);
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
+  await f.advance();
+  assert.equal(f.calls.writes.at(-1).text, 'anglebias 12.6');
 });
 
 test('page demo mode exercises real controls without connecting, scanning or writing BLE', async (t) => {
@@ -695,13 +721,13 @@ test('page unload sends neutral, disconnects and releases all BLE listeners', as
   assert.equal(f.calls.writes.length, sent);
 });
 
-test('page profile switch sends old neutral and uses the new format only after rearming', async (t) => {
+test('page reconnect keeps main motion format and requires rearming', async (t) => {
   const f = fixture(t);
   await f.connected();
   await f.move();
-  f.page.onProfileChange({ detail: { value: 1 } });
+  f.page.disconnectDevice();
   await f.advance();
-  assert.equal(f.page.data.profileIndex, 1);
+  await f.connected();
   assert.equal(f.page.data.ready, true);
   assert.equal(f.page.data.armed, false);
   assert.ok(isNeutral(f.calls.writes.at(-1).text));
@@ -711,13 +737,6 @@ test('page profile switch sends old neutral and uses the new format only after r
   f.page.toggleArmed();
   await f.advance();
   assert.equal(f.page.data.armed, true);
-  assert.match(f.calls.writes.at(-1).text, /^@R 0 0 0 [0-9.]+\n$/);
-  f.page.onProfileChange({ detail: { value: 0 } });
-  await f.advance();
-  assert.equal(f.page.data.armed, false);
-  assert.equal(f.page.data.profileIndex, 0);
-  f.page.toggleArmed();
-  await f.advance();
   assert.ok(isNeutral(f.calls.writes.at(-1).text));
 });
 

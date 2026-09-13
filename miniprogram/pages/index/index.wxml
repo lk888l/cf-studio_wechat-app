@@ -219,14 +219,6 @@
                 <text class="tuning-row-status">{{item.status}}</text>
               </block>
             </view>
-            <button
-              wx:if="{{profileIndex === 1 && tuningGroupIndex === 1}}"
-              class="tuning-auto"
-              bindtap="restoreAutoAngleKp"
-              disabled="{{!ready || busy || tuningBusy || parameters.busy || parameterPreparing}}"
-            >
-              恢复自动 Kp
-            </button>
             <text class="tuning-note">{{tuningGroups[tuningGroupIndex].note}}</text>
           </scroll-view>
           <view class="tuning-footer">
@@ -351,14 +343,6 @@
         ><view
           ><text class="eyebrow">BLUETOOTH LOW ENERGY</text
           ><text class="section-title">设备连接</text></view
-        ><picker
-          range="{{profileNames}}"
-          value="{{profileIndex}}"
-          disabled="{{busy}}"
-          bindchange="onProfileChange"
-          ><view class="profile-picker"
-            ><text>{{profileNames[profileIndex]}}</text><text>⌄</text></view
-          ></picker
         ></view
       >
       <view wx:if="{{error || ble.error}}" class="error-notice"
@@ -369,8 +353,7 @@
         ><view
           ><text class="notice-title">ZX-D30 · 微信 BLE 遥控</text
           ><text class="notice-copy"
-            >搜索 D30SP_126BB2（其他版本可能为 D30LE_ 开头）；使用 FFE0 服务的 FFE1 或 FFE2
-            透传通道，返回通知为 FFE1。</text
+            >连接 {{targetBluetoothName}} 后自动配置通讯通道，无需手动选择。</text
           ></view
         ></view
       >
@@ -432,7 +415,19 @@
           >
         </view>
         <view class="connection-details">
-          <view wx:if="{{ble.endpoints.length}}" class="panel endpoint-panel"
+          <view class="panel target-device-panel">
+            <view class="section-heading"><text class="panel-title">需要连接的蓝牙</text></view>
+            <view class="target-device-name"><text selectable>{{targetBluetoothName}}</text></view>
+            <text class="target-device-hint">选择并点击 {{targetBluetoothName}}</text>
+            <text class="section-description">在左侧设备列表中找到该名称，点击“连接”。</text>
+          </view>
+          <view wx:if="{{ble.status === 'ready'}}" class="panel endpoint-panel"
+            ><view class="section-heading"
+              ><text class="panel-title">通讯已就绪</text
+              ><view class="small-badge">已连接</view></view
+            ><text class="section-description">可以返回遥控台启用本地控制。</text></view
+          >
+          <view wx:elif="{{ble.status === 'selecting' && !busy}}" class="panel endpoint-panel"
             ><view class="section-heading"
               ><text class="panel-title">选择串口端点</text
               ><view class="small-badge">{{ble.endpoints.length}}</view></view
@@ -473,8 +468,8 @@
               ><view class="help-section"
                 ><text class="help-title">02 / 当前适配范围</text
                 ><text
-                  >烧录本次固件后选择 SoftEngine，连接 ZX-D30（本机名称 D30SP_126BB2）。 FFE1/FFE2
-                  用于透传，FFE3 用于模块 IO 控制，不用于小车遥控。</text
+                  >连接 ZX-D30（本机名称 {{targetBluetoothName}}）。当前统一使用 main 通讯格式，
+                  自动使用 FFE2 发送、FFE1 接收，无需手动选择协议或通道。</text
                 ></view
               ><view class="help-section"
                 ><text class="help-title">03 / 双摇杆与失联</text

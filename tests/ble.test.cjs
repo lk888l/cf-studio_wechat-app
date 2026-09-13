@@ -458,7 +458,7 @@ test('BLE late discovery start is stopped after the caller has cancelled the sca
 });
 
 for (const short of [false, true]) {
-  test(`ZX-D30 UART excludes GPIO and pairs FFE2 with FFE1 (short=${short})`, async (t) => {
+  test(`ZX-D30 automatically connects through FFE2 and receives on FFE1 (short=${short})`, async (t) => {
     const uuid = (id) => (short ? id.toLowerCase() : `0000${id}-0000-1000-8000-00805F9B34FB`);
     const f = fixture(t, {
       getBLEDeviceServices(options) {
@@ -468,18 +468,18 @@ for (const short of [false, true]) {
         options.success({
           characteristics: [
             characteristic(uuid('FFE3'), { write: true, notify: true }),
-            characteristic(uuid('FFE2'), { write: true }),
             characteristic(uuid('FFE1'), { write: true, notify: true }),
+            characteristic(uuid('FFE2'), { write: true, notify: true }),
           ],
         });
       },
     });
     await f.transport.connect('D30SP_126BB2');
     assert.equal(f.state().endpoints.length, 2);
-    assert.equal(f.state().endpoints[0].writeId, uuid('FFE2'));
+    assert.equal(f.state().status, 'ready');
+    assert.equal(f.state().endpoint.writeId, uuid('FFE2'));
     assert.equal(f.state().endpoints[0].notifyId, uuid('FFE1'));
     assert.equal(f.state().endpoints[1].notifyId, uuid('FFE1'));
-    await f.transport.selectEndpoint(f.state().endpoints[0]);
     assert.equal(f.calls.notify[0].characteristicId, uuid('FFE1'));
     await f.transport.send('@ping\n');
     assert.equal(f.calls.writes[0].characteristicId, uuid('FFE2'));
@@ -496,6 +496,49 @@ for (const short of [false, true]) {
     assert.deepEqual(received, ['pong\n']);
   });
 }
+
+test('ZX-D30 rejects a module without writable FFE2 instead of using FFE1', async (t) => {
+  const f = fixture(t, {
+    getBLEDeviceServices(options) {
+      options.success({ services: [{ uuid: 'FFE0' }] });
+    },
+    getBLEDeviceCharacteristics(options) {
+      options.success({ characteristics: [characteristic('FFE1', { write: true, notify: true })] });
+    },
+  });
+  await assert.rejects(f.transport.connect('robot'), /缺少可写的 FFE2/);
+  assert.equal(f.state().status, 'error');
+  assert.equal(f.state().endpoint, null);
+  assert.equal(f.calls.writes.length, 0);
+});
+
+test('ZX-D30 disconnect during automatic notification setup cannot restore ready state', async (t) => {
+  let pendingNotify;
+  const f = fixture(t, {
+    getBLEDeviceServices(options) {
+      options.success({ services: [{ uuid: 'FFE0' }] });
+    },
+    getBLEDeviceCharacteristics(options) {
+      options.success({
+        characteristics: [
+          characteristic('FFE2', { write: true }),
+          characteristic('FFE1', { notify: true }),
+        ],
+      });
+    },
+    notifyBLECharacteristicValueChange(options) {
+      pendingNotify = options;
+    },
+  });
+  const connecting = assert.rejects(f.transport.connect('robot'), /会话已结束/);
+  await flush();
+  assert.ok(pendingNotify);
+  await f.transport.disconnect();
+  pendingNotify.success({});
+  await connecting;
+  assert.equal(f.state().status, 'idle');
+  assert.equal(f.state().endpoint, null);
+});
 
 test('ZX-D30 never substitutes GPIO notification when UART notify is missing', async (t) => {
   const f = fixture(t, {
@@ -514,7 +557,7 @@ test('ZX-D30 never substitutes GPIO notification when UART notify is missing', a
   await f.transport.connect('robot');
   assert.equal(f.state().endpoints.length, 1);
   assert.equal(f.state().endpoints[0].notifyId, undefined);
-  await f.transport.selectEndpoint(f.state().endpoints[0]);
+  assert.equal(f.state().status, 'ready');
   assert.equal(f.calls.notify.length, 0);
   assert.match(f.state().error, /未启用返回通知/);
 });

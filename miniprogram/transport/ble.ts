@@ -261,11 +261,18 @@ export class BleTransport {
         }
       }
       this.checkSession(session);
+      const zxD30 = services.some((service) => sameUuid(service.uuid, 'FFE0'));
+      const fixedEndpoint = endpoints.find(
+        (endpoint) => sameUuid(endpoint.serviceId, 'FFE0') && sameUuid(endpoint.writeId, 'FFE2'),
+      );
+      if (zxD30 && !fixedEndpoint)
+        throw new Error('设备缺少可写的 FFE2 透传通道，请检查模块后重新连接');
       if (!endpoints.length)
         throw new Error(
           '设备没有可写的 BLE 特征。普通 HC-05 使用经典蓝牙 SPP，微信小程序无法直连，请使用 BLE 串口模块',
         );
       this.patch({ status: 'selecting', endpoints, endpoint: null, error: '' });
+      if (fixedEndpoint) await this.selectEndpoint(fixedEndpoint);
     } catch (reason) {
       if (this.isCurrent(session)) this.failSession(errorMessage(reason, '连接'));
       throw reason;
@@ -520,10 +527,11 @@ export class BleTransport {
             ? notifications.find((item) => sameUuid(item.uuid, 'FFE1'))
             : undefined;
         const paired =
-          notifications.find((item) => sameUuid(item.uuid, characteristic.uuid)) ||
-          nordicNotify ||
-          zxD30Notify ||
-          (notifications.length === 1 ? notifications[0] : undefined);
+          sameUuid(serviceId, 'FFE0') && sameUuid(characteristic.uuid, 'FFE2')
+            ? zxD30Notify
+            : notifications.find((item) => sameUuid(item.uuid, characteristic.uuid)) ||
+              nordicNotify ||
+              (notifications.length === 1 ? notifications[0] : undefined);
         return {
           serviceId,
           writeId: characteristic.uuid,
