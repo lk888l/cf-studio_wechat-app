@@ -192,7 +192,7 @@
                     class="tuning-send"
                     data-id="{{item.id}}"
                     bindtap="sendTuningParameter"
-                    disabled="{{!ready || busy || tuningBusy}}"
+                    disabled="{{!ready || busy || tuningBusy || parameters.busy || parameterPreparing}}"
                   >
                     {{tuningBusy === item.id ? '发送中' : '发送'}}
                   </button>
@@ -223,14 +223,35 @@
               wx:if="{{profileIndex === 1 && tuningGroupIndex === 1}}"
               class="tuning-auto"
               bindtap="restoreAutoAngleKp"
-              disabled="{{!ready || busy || tuningBusy}}"
+              disabled="{{!ready || busy || tuningBusy || parameters.busy || parameterPreparing}}"
             >
               恢复自动 Kp
             </button>
             <text class="tuning-note">{{tuningGroups[tuningGroupIndex].note}}</text>
           </scroll-view>
           <view class="tuning-footer">
-            <text class="tuning-message" wx:if="{{tuningMessage}}">{{tuningMessage}}</text>
+            <view class="parameter-toolbar">
+              <button
+                class="parameter-entry"
+                bindtap="saveParameters"
+                disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing}}"
+              >
+                {{parameters.busy === 'save' ? '等待保存结果…' : '保存参数'}}
+              </button>
+              <button
+                class="parameter-details"
+                bindtap="openParameterPanel"
+                disabled="{{parameters.busy || parameterPreparing}}"
+              >
+                参数状态
+              </button>
+            </view>
+            <text
+              class="tuning-message {{parameters.success ? 'parameter-success' : ''}}"
+              wx:if="{{parameters.message}}"
+              >{{parameters.message}}</text
+            >
+            <text class="tuning-message" wx:elif="{{tuningMessage}}">{{tuningMessage}}</text>
             <text wx:else
               >{{ready ? '拖动或输入后点发送 · 下滑查看更多' : '可编辑 · 连接或模拟后发送'}}</text
             >
@@ -287,7 +308,7 @@
         ><switch
           class="arm-switch"
           checked="{{armed}}"
-          disabled="{{!ready || busy}}"
+          disabled="{{!ready || busy || parameters.busy || parameterPreparing}}"
           color="#458dcc"
           bindchange="toggleArmed"
           aria-label="启用本地控制"
@@ -520,4 +541,84 @@
       ><text class="console-note">蓝牙写入成功不等于设备动作已确认。</text></view
     >
   </scroll-view>
+
+  <view wx:if="{{parameterPanelOpen}}" class="parameter-overlay">
+    <view class="parameter-dialog">
+      <view class="parameter-heading">
+        <text class="panel-title">参数状态与控制</text>
+        <button class="text-button" bindtap="closeParameterPanel">返回调参</button>
+      </view>
+      <scroll-view class="parameter-scroll" scroll-y enhanced>
+        <view class="parameter-content">
+          <text class="section-description"
+            >一次保存重心基准、姿态 / 速度 / 差速 / 腿部 PID 的
+            P/I/D，以及车端当前腿高和横滚目标。写入 STM32
+            Flash，断电后自动恢复；速度、转向和电机输出不保存。</text
+          >
+          <text class="parameter-note"
+            >支持运行时直接保存，无需关闭控制或发送全部参数。只想修改部分参数时，发送对应项即可，其余沿用小车当前值。</text
+          >
+          <text class="parameter-note"
+            >此处用于手动查询与控制；调参页“保存参数”直接发送保存命令。</text
+          >
+          <text wx:if="{{!parameterAvailable}}" class="parameter-note"
+            >{{demo ? '模拟模式不发送蓝牙命令。' : '请先连接蓝牙设备并确认串口通道。'}}</text
+          >
+          <view class="parameter-status">
+            <text
+              >车端平衡：{{!parameters.status ? '待查询' : (parameters.status.armed ? '已使能' :
+              '已关闭')}}</text
+            >
+            <text
+              >控制开关：{{!parameters.status || parameters.status.enabled === null ? '未知' :
+              (parameters.status.enabled ? '开启' : '关闭')}}</text
+            >
+            <text
+              >保存状态：{{!parameters.status ? '待查询' : (parameters.status.unsaved ?
+              '存在未保存修改' : '无未保存修改')}}</text
+            >
+            <text
+              >Flash 配置：{{!parameters.status || parameters.status.flashValid === null ? '未知' :
+              (parameters.status.flashValid ? '有效' : '尚无有效配置')}}</text
+            >
+          </view>
+          <view class="parameter-actions">
+            <button
+              class="button button-secondary"
+              bindtap="queryParameters"
+              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing}}"
+            >
+              {{parameters.busy === 'params' ? '查询中…' : '查询参数状态'}}
+            </button>
+            <button
+              class="button button-secondary"
+              bindtap="disableFirmwareControl"
+              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing}}"
+            >
+              {{parameters.busy === 'off' ? '确认关闭中…' : '关闭车端控制'}}
+            </button>
+            <button
+              class="button button-secondary"
+              bindtap="enableFirmwareControl"
+              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing}}"
+            >
+              {{parameters.busy === 'on' ? '恢复中…' : '恢复车端控制'}}
+            </button>
+          </view>
+          <text
+            wx:if="{{parameters.message}}"
+            class="parameter-result {{parameters.success ? 'parameter-success' : ''}}"
+            selectable
+            >{{parameters.message}}</text
+          >
+          <text wx:if="{{armed}}" class="parameter-note"
+            >本地控制仍在发送目标；“关闭车端控制”会先停止本地遥控。</text
+          >
+          <text class="section-description"
+            >普通保存不改变控制状态。完整参数及回执可在“日志”中查看。</text
+          >
+        </view>
+      </scroll-view>
+    </view>
+  </view>
 </view>

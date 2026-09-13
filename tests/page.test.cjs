@@ -54,6 +54,7 @@ function fixture(t, overrides = {}) {
       success(options);
     },
     setClipboardData: success,
+    showModal: (options) => options.success({ confirm: false, cancel: true }),
     getStorageSync: () => '',
     setStorageSync: () => undefined,
     ...overrides,
@@ -160,6 +161,262 @@ function fixture(t, overrides = {}) {
 }
 
 const tuningInput = (id, value) => ({ currentTarget: { dataset: { id } }, detail: { value } });
+
+function receiveParameters(f, text) {
+  f.emit('BLECharacteristicValueChange', {
+    deviceId: 'robot',
+    serviceId: 'UART',
+    characteristicId: 'RX',
+    value: Uint8Array.from(Buffer.from(text)).buffer,
+  });
+}
+const disarmedParameters = 'params: flash_valid=true unsaved=true armed=false enabled=false\n';
+async function connectedSoftEngine(f) {
+  await f.connected();
+  f.page.onProfileChange({ detail: { value: 1 } });
+  await f.advance();
+  assert.equal(f.page.data.parameterAvailable, true);
+}
+test('page save immediately writes save without opening a panel, querying or confirming', async (t) => {
+  const f = fixture(t);
+  await connectedSoftEngine(f);
+  f.api.showModal = () => assert.fail('save must not show a confirmation');
+  const before = f.calls.writes.length;
+  // Dispatch the real primary button binding, so a modal-only entry cannot regress.
+  const template = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '../miniprogram/pages/index/index.wxml'),
+    'utf8',
+  );
+  const button = template.match(/<button\s+class="parameter-entry"[\s\S]*?<\/button>/)[0];
+  const handler = button.match(/bindtap="([^"]+)"/)[1];
+  f.page[handler]();
+  f.page.saveParameters();
+  f.page.toggleArmed();
+  f.page.sendTuningParameter(datasetEvent({ id: 'velocity-i' }));
+  assert.equal(f.page.data.armed, false);
+  await f.advance();
+  assert.equal(f.page.data.parameterPanelOpen, false);
+  assert.deepEqual(
+    f.calls.writes.slice(before).map((write) => write.text),
+    ['save\n'],
+  );
+  assert.equal(f.calls.writes.at(-1).text, 'save\n');
+  assert.equal(f.page.data.parameters.success, false);
+  receiveParameters(f, 'OK\nnRF: send success\nsave: unchanged (no flash write)\r');
+  assert.equal(f.page.data.parameters.busy, 'save');
+  receiveParameters(f, '\n');
+  await flush();
+  assert.equal(f.page.data.parameters.success, true);
+  assert.equal(f.page.data.parameters.status, null);
+  assert.equal(f.page.data.parameters.message, '参数未变化，已经保存');
+  assert.equal(f.calls.writes.filter((write) => write.text === 'save\n').length, 1);
+  assert.ok(!f.calls.writes.some((write) => /control |recycle|velocitypid/.test(write.text)));
+});
+
+for (const changedOneParameter of [false, true]) {
+  test(`page directly saves car parameters after sending ${changedOneParameter ? 'only one item' : 'no items'}`, async (t) => {
+    const f = fixture(t);
+    await connectedSoftEngine(f);
+    if (changedOneParameter) {
+      const beforeTuning = f.calls.writes.length;
+      f.page.onTuningInput(tuningInput('velocity-i', '0.009'));
+      f.page.sendTuningParameter(datasetEvent({ id: 'velocity-i' }));
+      await f.advance();
+      assert.equal(
+        f.calls.writes
+          .slice(beforeTuning)
+          .map((write) => write.text)
+          .join(''),
+        '@velocitypid -i 0.009\n',
+      );
+      // An unfinished draft must not block saving values already on the car.
+      f.page.onTuningInput(tuningInput('angle-bias', '-'));
+    }
+    assert.equal(f.page.findTuningParameter('roll-i').status, '固件参考值 · 未发送');
+    assert.equal(f.page.data.parameters.status, null);
+    const before = f.calls.writes.length;
+    f.page.saveParameters();
+    await f.advance();
+    assert.deepEqual(
+      f.calls.writes.slice(before).map((write) => write.text),
+      ['save\n'],
+    );
+    receiveParameters(f, changedOneParameter ? 'save: ok\n' : 'save: unchanged\n');
+    await flush();
+    assert.equal(f.page.data.parameters.success, true);
+    assert.equal(f.page.data.parameters.status, null);
+  });
+}
+
+for (const result of ['ok (all motion parameters)', 'unchanged (no flash write)']) {
+  test(`runtime save ${result} keeps both joysticks and periodic BLE motion active`, async (t) => {
+    const f = fixture(t);
+    await connectedSoftEngine(f);
+    await f.move();
+    f.page.onLegJoystickStart(touchEvent([legTouch(8)]));
+    const target = { ...f.page.data.control };
+    const pointer = f.page.touchId;
+    const legPointer = f.page.legTouchId;
+    f.page.queryParameters();
+    await f.advance();
+    receiveParameters(f, 'params: unsaved=true armed=true enabled=true\n');
+    await flush();
+    const before = f.calls.writes.length;
+    f.page.saveParameters();
+    await f.advance();
+    assert.deepEqual(
+      f.calls.writes.slice(before).map((write) => write.text),
+      ['save\n'],
+    );
+    assert.equal(f.page.data.parameterPanelOpen, false);
+    assert.equal(f.page.data.armed, true);
+    assert.equal(f.page.touchId, pointer);
+    assert.equal(f.page.legTouchId, legPointer);
+    assert.deepEqual(f.page.data.control, target);
+    const afterSave = f.calls.writes.length;
+    for (let index = 0; index < 5; index++) await f.advance(100);
+    assert.ok(
+      f.calls.writes.length >= afterSave + 5,
+      'motion keeps refreshing while save is pending',
+    );
+    assert.ok(f.calls.writes.slice(afterSave).every((write) => write.text.startsWith('@R ')));
+    assert.equal(f.page.data.parameters.busy, 'save');
+    f.page.onJoystickMove(touchEvent([touch(7, 100, 164)]));
+    f.page.onLegJoystickMove(touchEvent([legTouch(8, 436, 100)]));
+    await f.advance(100);
+    const updatedTarget = { ...f.page.data.control };
+    assert.ok(updatedTarget.speed < 0);
+    assert.ok(updatedTarget.roll < 0);
+    receiveParameters(f, `save: ${result}\r`);
+    assert.equal(f.page.data.parameters.busy, 'save');
+    receiveParameters(f, '\n');
+    await flush();
+    assert.equal(f.page.data.parameters.success, true);
+    assert.equal(f.page.data.parameters.busy, '');
+    assert.equal(f.page.data.armed, true);
+    assert.equal(f.page.touchId, pointer);
+    assert.equal(f.page.legTouchId, legPointer);
+    assert.deepEqual(f.page.data.control, updatedTarget);
+    assert.deepEqual(
+      f.calls.writes
+        .slice(before)
+        .filter((write) => !write.text.startsWith('@R '))
+        .map((write) => write.text),
+      ['save\n'],
+    );
+    const afterResult = f.calls.writes.length;
+    await f.advance(100);
+    assert.ok(f.calls.writes.length > afterResult, 'motion keeps refreshing after save succeeds');
+  });
+}
+
+test('page closes firmware control only after support confirmation and checks params after off ACK', async (t) => {
+  let modal;
+  const f = fixture(t, {
+    showModal: (options) => {
+      modal = options;
+    },
+  });
+  await connectedSoftEngine(f);
+  f.page.toggleArmed();
+  await f.advance();
+  const off = f.page.disableFirmwareControl();
+  assert.match(modal.content, /扶稳车体/);
+  assert.ok(!f.calls.writes.some((write) => write.text === 'control off\n'));
+  modal.success({ confirm: true });
+  await f.advance();
+  await f.advance();
+  assert.equal(f.page.data.armed, false);
+  assert.equal(f.calls.writes.at(-1).text, 'control off\n');
+  receiveParameters(f, 'control: off requested; wait for params armed=false before save\n');
+  await f.advance();
+  assert.equal(f.page.data.parameters.status, null);
+  assert.equal(f.calls.writes.at(-1).text, 'params\n');
+  receiveParameters(f, disarmedParameters);
+  await off;
+  assert.equal(f.page.data.parameters.status.armed, false);
+  assert.match(f.page.data.parameters.message, /已确认车端控制关闭/);
+  assert.ok(!f.calls.writes.some((write) => write.text === 'save\n'));
+  f.page.enableFirmwareControl();
+  await f.advance();
+  assert.equal(f.calls.writes.at(-1).text, 'control on\n');
+  receiveParameters(f, 'control: on; waiting for normal startup conditions\n');
+  await f.advance();
+  receiveParameters(f, 'params: unsaved=true armed=false enabled=true\n');
+  await flush();
+  assert.equal(f.page.data.armed, false);
+  assert.match(f.page.data.parameters.message, /正常稳定启动流程/);
+});
+
+test('cancelled support confirmation sends no firmware command', async (t) => {
+  const f = fixture(t);
+  await connectedSoftEngine(f);
+  const before = f.calls.writes.length;
+  await f.page.disableFirmwareControl();
+  assert.equal(f.calls.writes.length, before);
+  assert.equal(f.page.data.parameterPreparing, false);
+});
+
+test('save timeout and late BLE reply never report page success', async (t) => {
+  const f = fixture(t);
+  await connectedSoftEngine(f);
+  f.page.saveParameters();
+  await f.advance();
+  await f.advance(5000);
+  assert.equal(f.page.data.parameters.message, '未收到保存结果');
+  assert.equal(f.page.data.parameters.busy, '');
+  receiveParameters(f, 'save: ok\n');
+  await flush();
+  assert.equal(f.page.data.parameters.success, false);
+});
+
+for (const action of ['disconnect', 'background', 'profile']) {
+  test(`page ${action} cancels waiting for save and rejects its late result`, async (t) => {
+    const f = fixture(t);
+    await connectedSoftEngine(f);
+    f.page.saveParameters();
+    await f.advance();
+    if (action === 'disconnect') f.page.disconnectDevice();
+    if (action === 'background') f.page.onHide();
+    if (action === 'profile') f.page.onProfileChange({ detail: { value: 0 } });
+    for (let index = 0; index < 4; index++) await f.advance();
+    receiveParameters(f, 'save: ok\n');
+    await flush();
+    assert.equal(f.page.data.parameters.success, false);
+    assert.equal(f.page.data.parameters.status, null);
+    assert.equal(f.calls.writes.filter((write) => write.text === 'save\n').length, 1);
+  });
+}
+
+test('save has no profile or notification gate; missing replies time out and SIM stays isolated', async (t) => {
+  const f = fixture(t, {
+    notifyBLECharacteristicValueChange: (options) => options.fail({ errCode: 10007 }),
+  });
+  await f.connected();
+  assert.equal(f.page.data.parameterAvailable, true);
+  f.page.saveParameters();
+  await f.advance();
+  assert.deepEqual(
+    f.calls.writes.map((write) => write.text),
+    ['save\n'],
+  );
+  await f.advance(5000);
+  assert.equal(f.page.data.parameters.message, '未收到保存结果');
+  assert.equal(f.page.data.parameters.success, false);
+  f.page.onProfileChange({ detail: { value: 1 } });
+  await f.advance();
+  assert.equal(f.page.data.parameterAvailable, true);
+  await f.demo();
+  assert.equal(f.page.data.parameterAvailable, false);
+  f.page.saveParameters();
+  f.page.queryParameters();
+  await f.page.disableFirmwareControl();
+  f.page.enableFirmwareControl();
+  const afterDemo = f.calls.writes.length;
+  await f.advance(1000);
+  assert.equal(f.calls.writes.length, afterDemo);
+  assert.equal(f.page.data.parameters.success, false);
+});
 
 test('center panel defaults to instruments and persists only its mode and parameter group', async (t) => {
   const saved = [];

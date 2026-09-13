@@ -2,6 +2,7 @@ import { RemoteController } from '../../control/controller';
 import { deviceProfiles, joystickVector, legJoystickVector, wl1Main } from '../../devices/profiles';
 import { parseTuningValue, tuningGroups } from '../../devices/tuning';
 import { onBackground } from '../../services/lifecycle';
+import { ParameterService, ParameterSnapshot } from '../../services/parameters';
 import { BleState, BleTransport } from '../../transport/ble';
 
 interface LogEntry {
@@ -79,9 +80,14 @@ Page({
     tuningGroups: createTuningGroups(wl1Main.id),
     tuningBusy: '',
     tuningMessage: '',
+    parameterPanelOpen: false,
+    parameterPreparing: false,
+    parameterAvailable: false,
+    parameters: { busy: '', status: null, message: '', success: false } as ParameterSnapshot,
   },
   transport: null as BleTransport | null,
   controller: null as RemoteController | null,
+  parameterService: null as ParameterService | null,
   subscriptions: [] as Array<() => void>,
   touchId: null as number | null,
   joystickRect: null as JoystickRect | null,
@@ -112,6 +118,19 @@ Page({
       // Storage is optional; the original instrument panel remains the default.
     }
     this.transport = new BleTransport();
+    this.parameterService = new ParameterService(
+      async (frame, onStart) => {
+        if (!this.data.parameterAvailable || !this.transport)
+          throw new Error('请先连接蓝牙设备并确认串口通道');
+        await this.transport.send(frame, onStart);
+        this.addLog('TX', frame);
+      },
+      (parameters) => {
+        if (this.destroyed) return;
+        this.setData({ parameters });
+        if (!parameters.busy && parameters.message) this.addLog('INFO', parameters.message);
+      },
+    );
     this.controller = new RemoteController(
       wl1Main,
       async (frame) => {
@@ -150,14 +169,23 @@ Page({
         if (ble.deviceId !== this.data.ble.deviceId) {
           this.setData({ lastReceive: '', lastReceiveAt: '', receiveCount: 0 });
         }
-        if (ready !== this.data.ready || ble.deviceId !== this.data.ble.deviceId)
+        if (
+          ready !== this.data.ready ||
+          ble.deviceId !== this.data.ble.deviceId ||
+          ble.endpoint?.writeId !== this.data.ble.endpoint?.writeId ||
+          ble.endpoint?.serviceId !== this.data.ble.endpoint?.serviceId ||
+          ble.endpoint?.notifyId !== this.data.ble.endpoint?.notifyId
+        ) {
           this.resetTuning();
+          this.resetParameters();
+        }
         this.setData({
           ble,
           ready,
           statusLabel: this.data.demo ? '模拟演练' : statusLabels[ble.status],
         });
         this.controller?.setReady(ready);
+        this.updateParameterAvailability();
         if (ble.error) this.setData({ error: ble.error });
       }),
     );
@@ -170,6 +198,7 @@ Page({
           receiveCount: this.data.receiveCount + 1,
         });
         this.addLog('RX', text);
+        if (this.visible) this.parameterService?.receive(text);
       }),
     );
     this.subscriptions.push(
@@ -213,6 +242,8 @@ Page({
   async suspend(): Promise<void> {
     if (this.suspension) return this.suspension;
     this.visible = false;
+    this.resetParameters();
+    this.setData({ parameterAvailable: false, parameterPanelOpen: false });
     this.clearJoysticks();
     this.setData({ busy: true });
     const work = async (): Promise<void> => {
@@ -239,6 +270,7 @@ Page({
 
   async perform(action: () => Promise<void>): Promise<void> {
     if (this.data.busy || this.destroyed || !this.visible) return;
+    this.resetParameters();
     this.setData({ busy: true, error: '' });
     try {
       await action();
@@ -261,6 +293,7 @@ Page({
   },
 
   switchTab(event: WechatMiniprogram.BaseEvent) {
+    this.resetParameters();
     this.releaseJoysticks();
     const tab = String(event.currentTarget.dataset.tab);
     if (['control', 'connection', 'console'].includes(tab)) {
@@ -289,6 +322,8 @@ Page({
       });
       this.controller?.setReady(ready);
       this.resetTuning();
+      this.resetParameters();
+      this.updateParameterAvailability();
       this.addLog(
         'INFO',
         demo ? '已进入模拟演练，所有帧仅在本地展示。' : '已退出模拟，请重新连接 BLE 设备。',
@@ -327,13 +362,22 @@ Page({
     const endpoint = this.data.ble.endpoints[Number(event.currentTarget.dataset.index)];
     if (!endpoint || this.data.demo) return;
     void this.perform(async () => {
+      this.resetParameters();
       await this.transport?.selectEndpoint(endpoint);
       this.addLog('INFO', `串口通道 ${endpoint.writeId}；写入成功不代表车端已执行。`);
     });
   },
 
   toggleArmed() {
-    if (this.data.busy || !this.data.ready || !this.visible) return;
+    if (
+      this.data.busy ||
+      this.data.parameters.busy ||
+      this.data.parameterPreparing ||
+      !this.data.ready ||
+      !this.visible
+    )
+      return;
+    this.resetParameters();
     if (this.data.armed) {
       void this.controller?.stop();
       return;
@@ -346,6 +390,7 @@ Page({
     }
   },
   stopMotion() {
+    this.resetParameters();
     this.clearJoysticks();
     void this.controller?.stop();
   },
@@ -499,6 +544,8 @@ Page({
         error: '',
       });
       this.resetTuning();
+      this.resetParameters();
+      this.updateParameterAvailability();
     });
   },
 
@@ -607,6 +654,8 @@ Page({
       !this.visible ||
       this.data.busy ||
       this.data.tuningBusy ||
+      this.data.parameters.busy ||
+      this.data.parameterPreparing ||
       !this.controller
     )
       return;
@@ -619,6 +668,7 @@ Page({
     try {
       await action();
       if (this.destroyed || epoch !== this.tuningEpoch) return;
+      if (!this.data.demo) this.parameterService?.markParametersChanged();
       const status = this.data.demo ? '模拟发送 · 未写入设备' : '已发送 · 未确认执行';
       this.updateTuningParameter(id === 'angle-auto' ? 'angle-p' : id, {
         status: id === 'angle-auto' ? `自动 Kp ${status}` : status,
@@ -633,6 +683,83 @@ Page({
     } finally {
       if (!this.destroyed && epoch === this.tuningEpoch) this.setData({ tuningBusy: '' });
     }
+  },
+  updateParameterAvailability() {
+    this.setData({
+      parameterAvailable: this.visible && !this.data.demo && this.data.ble.status === 'ready',
+    });
+  },
+  resetParameters() {
+    const message =
+      this.data.parameters.busy === 'save'
+        ? '未收到保存结果：操作已中断，请重新查询车端参数状态'
+        : '';
+    this.parameterService?.reset(message);
+  },
+  openParameterPanel() {
+    if (this.data.armed) this.releaseJoysticks();
+    this.setData({ parameterPanelOpen: true });
+    this.queryParameters();
+  },
+  closeParameterPanel() {
+    this.setData({ parameterPanelOpen: false });
+  },
+  canOperateParameters() {
+    return (
+      !this.destroyed &&
+      this.visible &&
+      this.data.parameterAvailable &&
+      !this.data.busy &&
+      !this.data.tuningBusy &&
+      !this.data.parameters.busy &&
+      !this.data.parameterPreparing
+    );
+  },
+  queryParameters() {
+    if (this.canOperateParameters()) void this.parameterService?.query();
+  },
+  saveParameters() {
+    if (!this.canOperateParameters()) return;
+    void this.parameterService?.save();
+  },
+  async disableFirmwareControl() {
+    if (!this.canOperateParameters()) return;
+    const epoch = this.tuningEpoch;
+    this.setData({ parameterPreparing: true });
+    try {
+      const confirmed = await new Promise<boolean>((resolve) => {
+        wx.showModal({
+          title: '关闭车端平衡控制',
+          content: '请先扶稳车体。关闭后车轮将停止平衡控制，车体需要支撑。确认已扶稳后继续。',
+          confirmText: '确认关闭',
+          success: (result) => resolve(result.confirm),
+          fail: () => resolve(false),
+        });
+      });
+      if (
+        !confirmed ||
+        this.destroyed ||
+        !this.visible ||
+        epoch !== this.tuningEpoch ||
+        !this.data.parameterAvailable
+      )
+        return;
+      this.clearJoysticks();
+      if (this.data.armed) await this.controller?.stop();
+      if (
+        this.destroyed ||
+        !this.visible ||
+        epoch !== this.tuningEpoch ||
+        !this.data.parameterAvailable
+      )
+        return;
+      await this.parameterService?.control(false);
+    } finally {
+      if (!this.destroyed) this.setData({ parameterPreparing: false });
+    }
+  },
+  enableFirmwareControl() {
+    if (this.canOperateParameters()) void this.parameterService?.control(true);
   },
   clearLogs() {
     this.setData({ logs: [] });

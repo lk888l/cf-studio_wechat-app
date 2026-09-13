@@ -321,7 +321,7 @@ export class BleTransport {
     }
   }
 
-  async send(frame: string): Promise<void> {
+  async send(frame: string, onStart?: () => void): Promise<void> {
     this.assertAlive();
     // Legacy idle-delimited commands still require one write. Only explicitly
     // framed SoftEngine commands can span multiple 20-byte GATT writes.
@@ -356,6 +356,7 @@ export class BleTransport {
           if (offset && Date.now() - queuedAt > MAX_QUEUE_AGE_MS)
             throw new Error('分帧发送等待过久，已取消剩余数据');
           const chunk = bytes.slice(offset, offset + 20);
+          if (offset === 0) onStart?.();
           await this.call<WechatMiniprogram.GeneralCallbackResult>(
             '发送串口命令',
             (callbacks) => {
