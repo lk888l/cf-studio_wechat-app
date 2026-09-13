@@ -16,15 +16,17 @@ test('WL1 encodes the car field order and the physical remote speed sign', () =>
     [{ speed: 30, turn: -12, roll: 8, height: 61.5 }, 'R -12 -30 8 61.5'],
     [{ speed: -30, turn: 12, roll: -8, height: 78.5 }, 'R 12 30 -8 78.5'],
     [{ speed: 100, turn: -100, roll: -18, height: 78.5 }, 'R -100 -100 -18 78.5'],
+    [{ speed: 150, turn: -150, roll: -18, height: 78.5 }, 'R -150 -150 -18 78.5'],
+    [{ speed: -150, turn: 150, roll: 18, height: 44.5 }, 'R 150 150 18 44.5'],
     [{ speed: -0, turn: -0, roll: -0, height: 61.5 }, 'R 0 0 0 61.5'],
   ];
   for (const [input, expected] of fixtures) assert.equal(encodeWl1(input), expected);
 });
 
-test('all physical-remote range corners fit one complete 20-byte ASCII write', () => {
+test('all super mode range corners fit one complete 20-byte ASCII write', () => {
   let longest = 0;
-  for (const speed of [-100, 100]) {
-    for (const turn of [-100, 100]) {
+  for (const speed of [-150, 150]) {
+    for (const turn of [-150, 150]) {
       for (const roll of [-18, 18]) {
         for (const height of [44.5, 78.5]) {
           const frame = encodeWl1({ speed, turn, roll, height });
@@ -41,22 +43,22 @@ test('all physical-remote range corners fit one complete 20-byte ASCII write', (
   assert.equal(longest, 20);
 });
 
-test('out-of-range commands are bounded to the proven remote limits', () => {
+test('out-of-range commands are bounded to the super mode limits', () => {
   assert.deepEqual(normalizeWl1({ speed: 10000, turn: -10000, roll: 500, height: -1 }), {
-    speed: 100,
-    turn: -100,
+    speed: 150,
+    turn: -150,
     roll: 18,
     height: 44.5,
   });
   assert.deepEqual(normalizeWl1({ speed: -10000, turn: 10000, roll: -500, height: 500 }), {
-    speed: -100,
-    turn: 100,
+    speed: -150,
+    turn: 150,
     roll: -18,
     height: 78.5,
   });
   assert.equal(
     encodeWl1({ speed: 10000, turn: -10000, roll: -500, height: 500 }),
-    'R -100 -100 -18 78.5',
+    'R -150 -150 -18 78.5',
   );
 });
 
@@ -95,8 +97,8 @@ test('joystick forward, backward, lateral and dead-zone behavior follow user dir
 test('SoftEngine uses explicit framing while main keeps its legacy wire format', () => {
   const profile = deviceProfiles.find((item) => item.id === 'wl1-softengine');
   assert.ok(profile && profile.supported);
-  for (const speed of [-100, 0, 100]) {
-    for (const turn of [-100, 0, 100]) {
+  for (const speed of [-150, -100, 0, 100, 150]) {
+    for (const turn of [-150, -100, 0, 100, 150]) {
       for (const roll of [-18, 0, 18]) {
         const input = { speed, turn, roll, height: 78.5 };
         assert.equal(profile.encode(input), `@${encodeWl1(input)}\n`);

@@ -512,40 +512,90 @@ for (const side of ['left', 'right']) {
   });
 }
 
-test('page expires each joystick independently at five seconds and requires a fresh touchstart', async (t) => {
+test('page keeps both joystick targets and pointers during prolonged stationary holds', async (t) => {
   const f = fixture(t);
-  await f.demo();
+  await f.connected();
   await f.move(7);
-  await f.advance(2900);
+  for (let tick = 0; tick < 29; tick += 1) await f.advance(100);
   f.page.onLegJoystickStart(touchEvent([legTouch(8)], [touch(7), legTouch(8)]));
-  await f.advance(2000);
-  assert.equal(f.page.touchId, null);
-  assert.equal(f.page.data.motionHolding, false);
-  assert.equal(f.page.data.knobX, 0);
-  assert.equal(f.page.data.knobY, 0);
+  const targets = { ...f.page.data.control };
+  const knobs = [f.page.data.knobX, f.page.data.knobY, f.page.data.legKnobX, f.page.data.legKnobY];
+  for (let tick = 0; tick < 650; tick += 1) await f.advance(100);
+  assert.equal(f.page.touchId, 7);
+  assert.equal(f.page.legTouchId, 8);
+  assert.equal(f.page.data.motionHolding, true);
+  assert.equal(f.page.data.poseHolding, true);
+  assert.deepEqual(f.page.data.control, targets);
+  assert.deepEqual(
+    [f.page.data.knobX, f.page.data.knobY, f.page.data.legKnobX, f.page.data.legKnobY],
+    knobs,
+  );
+  assert.equal(f.page.data.error, '');
+  assert.equal(
+    f.calls.writes.at(-1).text,
+    'R ' +
+      targets.turn +
+      ' ' +
+      -targets.speed +
+      ' ' +
+      targets.roll +
+      ' ' +
+      targets.height.toFixed(1),
+  );
+  f.page.onJoystickMove(touchEvent([touch(7, 100, 164)]));
+  f.page.onLegJoystickMove(touchEvent([legTouch(8, 436, 100)]));
+  await f.advance(100);
+  assert.ok(f.page.data.control.speed < 0);
+  assert.ok(f.page.data.control.roll < 0);
+  f.page.onJoystickEnd(touchEvent([touch(7)], [legTouch(8)]));
+  await f.advance();
   assert.equal(f.page.data.control.speed, 0);
   assert.equal(f.page.legTouchId, 8);
-  assert.equal(f.page.data.poseHolding, true);
-  assert.ok(f.page.data.control.roll > 0);
-  f.page.onJoystickMove(touchEvent([touch(7)]));
-  assert.equal(f.page.data.control.speed, 0);
-
-  f.page.onJoystickStart(touchEvent([touch(9)], [touch(9), legTouch(8)]));
-  assert.ok(f.page.data.control.speed > 0);
   const height = f.page.data.control.height;
-  await f.advance(3000);
-  assert.equal(f.page.legTouchId, null);
-  assert.equal(f.page.data.poseHolding, false);
-  assert.equal(f.page.data.legKnobX, 0);
-  assert.equal(f.page.data.legKnobY, 0);
+  f.page.onLegJoystickEnd(touchEvent([legTouch(8)], []));
+  await f.advance();
   assert.equal(f.page.data.control.roll, 0);
   assert.equal(f.page.data.control.height, height);
-  assert.equal(f.page.touchId, 9);
-  assert.ok(f.page.data.control.speed > 0);
-  f.page.onLegJoystickMove(touchEvent([legTouch(8)]));
-  assert.equal(f.page.data.control.roll, 0);
-  f.page.onLegJoystickStart(touchEvent([legTouch(10)], [touch(9), legTouch(10)]));
-  assert.ok(f.page.data.control.roll > 0);
+  assert.equal(f.page.touchId, null);
+  assert.equal(f.page.legTouchId, null);
+  assert.ok(isNeutral(f.calls.writes.at(-1).text));
+});
+
+test('page defaults to full range and sends each speed mode through BLE including 150 RPM', async (t) => {
+  const f = fixture(t);
+  assert.deepEqual(f.page.data.speedModes, [
+    '标准 · 60 RPM',
+    '全量程 · 100 RPM',
+    '超级模式 · 150 RPM',
+  ]);
+  assert.equal(f.page.data.speedModeIndex, 1);
+  await f.connected();
+  await f.move(7);
+  assert.equal(f.page.data.control.speed, 100);
+  assert.equal(f.calls.writes.at(-1).text, 'R 0 -100 0 44.5');
+  for (const [index, limit] of [
+    [0, 60],
+    [1, 100],
+    [2, 150],
+  ]) {
+    f.page.onSpeedModeChange({ detail: { value: String(index) } });
+    await f.advance();
+    assert.equal(f.page.data.control.speed, 0);
+    assert.equal(f.page.touchId, null);
+    assert.ok(isNeutral(f.calls.writes.at(-1).text));
+    f.page.onJoystickStart(touchEvent([touch(7)]));
+    await f.advance(100);
+    assert.equal(f.page.data.control.speed, limit);
+    assert.equal(f.calls.writes.at(-1).text, 'R 0 ' + -limit + ' 0 44.5');
+    f.page.onJoystickMove(touchEvent([touch(7, 100, 164)]));
+    await f.advance(100);
+    assert.equal(f.page.data.control.speed, -limit);
+    assert.equal(f.calls.writes.at(-1).text, 'R 0 ' + limit + ' 0 44.5');
+    f.page.onJoystickMove(touchEvent([touch(7, 164, 100)]));
+    await f.advance(100);
+    assert.equal(f.page.data.control.turn, limit);
+    assert.equal(f.calls.writes.at(-1).text, 'R ' + limit + ' 0 0 44.5');
+  }
 });
 
 for (const action of ['stop', 'background', 'tab', 'resize']) {

@@ -31,8 +31,6 @@ export class RemoteController {
   private drainPromise: Promise<void> | null = null;
   private ready = false;
   private generation = 0;
-  private holdDeadline = 0;
-  private poseHoldDeadline = 0;
   private stopping = false;
 
   constructor(
@@ -74,8 +72,6 @@ export class RemoteController {
     this.generation += 1;
     this.pending = false;
     this.clearTimer();
-    this.holdDeadline = 0;
-    this.poseHoldDeadline = 0;
     this.state = {
       ...this.state,
       armed: false,
@@ -109,47 +105,27 @@ export class RemoteController {
       control: neutral(this.state.control),
       error: '',
     };
-    this.holdDeadline = 0;
-    this.poseHoldDeadline = 0;
     this.emit();
     this.requestSend();
     this.timer = this.timing.setInterval(() => {
-      // A lost touchend must not renew a motion command indefinitely.
-      if (this.holdDeadline && this.timing.now() >= this.holdDeadline) {
-        this.holdDeadline = 0;
-        this.state.motionHolding = false;
-        this.state.control = { ...this.state.control, speed: 0, turn: 0 };
-        this.state.error = '速度摇杆连续操作已达 5 秒，请松手后重新操作';
-        this.emit();
-      }
-      if (this.poseHoldDeadline && this.timing.now() >= this.poseHoldDeadline) {
-        this.poseHoldDeadline = 0;
-        this.state.poseHolding = false;
-        this.state.control = { ...this.state.control, roll: 0 };
-        this.state.error = '腿部摇杆连续操作已达 5 秒，请松手后重新操作';
-        this.emit();
-      }
       this.requestSend();
     }, this.profile.intervalMs);
   }
 
   beginHold(): void {
     if (!this.state.armed) return;
-    this.holdDeadline = this.timing.now() + 5000;
     this.state.motionHolding = true;
     this.state.error = '';
     this.emit();
   }
 
   move(speed: number, turn: number): void {
-    if (!this.state.armed || !this.holdDeadline || this.timing.now() >= this.holdDeadline) return;
+    if (!this.state.armed || !this.state.motionHolding) return;
     this.state.control = this.profile.normalize({ ...this.state.control, speed, turn });
     this.emit();
   }
 
   release(): void {
-    this.holdDeadline = 0;
-    this.poseHoldDeadline = 0;
     this.state.motionHolding = false;
     this.state.poseHolding = false;
     this.state.control = neutral(this.state.control);
@@ -158,7 +134,6 @@ export class RemoteController {
   }
 
   releaseMotion(): void {
-    this.holdDeadline = 0;
     this.state.motionHolding = false;
     this.state.control = { ...this.state.control, speed: 0, turn: 0 };
     this.emit();
@@ -167,22 +142,19 @@ export class RemoteController {
 
   beginPoseHold(): void {
     if (!this.state.armed) return;
-    this.poseHoldDeadline = this.timing.now() + 5000;
     this.state.poseHolding = true;
     this.state.error = '';
     this.emit();
   }
 
   movePose(height: number, roll: number): void {
-    if (!this.state.armed || !this.poseHoldDeadline || this.timing.now() >= this.poseHoldDeadline)
-      return;
+    if (!this.state.armed || !this.state.poseHolding) return;
     this.state.control = this.profile.normalize({ ...this.state.control, height, roll });
     this.emit();
     // Both sticks are coalesced into the same scheduled R frame.
   }
 
   releasePose(): void {
-    this.poseHoldDeadline = 0;
     this.state.poseHolding = false;
     this.state.control = { ...this.state.control, roll: 0 };
     this.emit();
@@ -200,8 +172,6 @@ export class RemoteController {
   async stop(): Promise<void> {
     this.stopping = true;
     this.clearTimer();
-    this.holdDeadline = 0;
-    this.poseHoldDeadline = 0;
     this.state.armed = false;
     this.state.motionHolding = false;
     this.state.poseHolding = false;
@@ -244,8 +214,6 @@ export class RemoteController {
         this.pending = false;
         this.clearTimer();
         this.state.armed = false;
-        this.holdDeadline = 0;
-        this.poseHoldDeadline = 0;
         this.state.motionHolding = false;
         this.state.poseHolding = false;
         this.state.control = neutral(this.state.control);

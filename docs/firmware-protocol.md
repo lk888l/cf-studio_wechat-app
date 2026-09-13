@@ -41,12 +41,12 @@ ASCII，命令名大小写敏感，字段之间使用**单个 ASCII 空格**。�
 
 | 字段     | 含义                           | 小程序采用的边界 | 编码                         |
 | -------- | ------------------------------ | ---------------- | ---------------------------- |
-| turn     | 左轮 RPM − 右轮 RPM 的目标差值 | −100…100         | 整数                         |
-| velocity | 两轮平均 RPM 目标              | −100…100         | 整数；取 UI 前后速度的相反数 |
+| turn     | 左轮 RPM − 右轮 RPM 的目标差值 | −150…150         | 整数                         |
+| velocity | 两轮平均 RPM 目标              | −150…150         | 整数；取 UI 前后速度的相反数 |
 | roll     | 横滚目标，度                   | −18…18           | 整数                         |
 | height   | 共同腿高目标，mm               | 44.5…78.5        | 一位小数                     |
 
-这些速度、转向、横滚边界来自已存在的实体遥控器限幅，并非主分支车端对输入的校验。小程序必须自行拒绝非有限数、限幅和量化。腿高在车端最终会受到物理目标限幅。UI 的正速度编码为负 `velocity`，与实体遥控器一致；实际前进/左右转方向还应结合车轮安装进行架空验证。
+原实体遥控器的速度、转向边界为 ±100 RPM；小程序增加超级模式后将这两项扩展至 ±150 RPM，默认全量程档仍为 100 RPM。横滚边界沿用实体遥控器限幅。这些是小程序的输入边界，并非主分支车端对输入的校验。小程序自行拒绝非有限数、限幅和量化。腿高在车端最终会受到物理目标限幅。UI 的正速度编码为负 `velocity`，与实体遥控器一致；150 RPM 的实际车端表现尚需真机验证。
 
 实现来源：[R 处理器，第 296–304 行](https://github.com/lk888l/wheeled-legged_Robot-WL1/blob/9b58e9e2c5841b2cead52b57b195567b3c94cd3d/car_firmware/Component/UserApp/main.cpp#L296)、[遥控器限制，第 3–11 行](https://github.com/lk888l/wheeled-legged_Robot-WL1/blob/9b58e9e2c5841b2cead52b57b195567b3c94cd3d/tele_firmware/Component/UserApp/RemoteControlState.hpp#L3)、[遥控器编码，第 10–17 行](https://github.com/lk888l/wheeled-legged_Robot-WL1/blob/9b58e9e2c5841b2cead52b57b195567b3c94cd3d/tele_firmware/Component/UserApp/RemoteCommandCodec.cpp#L10)。
 
@@ -55,7 +55,7 @@ ASCII，命令名大小写敏感，字段之间使用**单个 ASCII 空格**。�
 ```text
 R 0 0 0 44.5
 R 0 -30 0 61.5
-R -100 -100 -18 78.5
+R -150 -150 -18 78.5
 ```
 
 最后一帧为最坏符号/位数组合，恰好 **20 字节**；采用上述范围和量化后可以完整放入单次默认 20 字节 BLE 特征值写入。原实体遥控器把所有值保留一位小数，其最坏帧为 26 字节，不能在本项目中直接套用并分片。

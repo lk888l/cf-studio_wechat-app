@@ -44,8 +44,8 @@ Page({
     armed: false,
     busy: false,
     control: { ...wl1Main.initial },
-    speedModes: ['精细 · 30 RPM', '标准 · 60 RPM', '全量程 · 100 RPM'],
-    speedModeIndex: 0,
+    speedModes: ['标准 · 60 RPM', '全量程 · 100 RPM', '超级模式 · 150 RPM'],
+    speedModeIndex: 1,
     knobX: 0,
     knobY: 0,
     legKnobX: 0,
@@ -303,7 +303,7 @@ Page({
     }
     try {
       this.controller?.arm();
-      this.addLog('INFO', '控制已启用。单次握持最多 5 秒；松手归零，腿高保持。');
+      this.addLog('INFO', '控制已启用。摇杆握持不限时；松手归零，腿高保持。');
     } catch (error) {
       this.setData({ error: error instanceof Error ? error.message : '无法启用控制' });
     }
@@ -371,7 +371,7 @@ Page({
     const { speed, turn } = joystickVector(
       x / radius,
       y / radius,
-      [30, 60, 100][this.data.speedModeIndex],
+      [60, 100, 150][this.data.speedModeIndex],
     );
     this.setData({ knobX: Math.round(x), knobY: Math.round(y) });
     this.controller?.move(speed, turn);

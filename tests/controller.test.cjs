@@ -221,7 +221,7 @@ test('background stop behavior disarms and cannot be resumed by stale touch call
   assert.equal(controller.snapshot().armed, false);
 });
 
-test('move events never extend the five-second hold deadline and require a new hold', async (t) => {
+test('motion holds keep sending beyond five seconds and accept moves until release', async (t) => {
   const { controller, timing, frames } = immediateController(t);
   controller.setReady(true);
   controller.arm();
@@ -238,13 +238,23 @@ test('move events never extend the five-second hold deadline and require a new h
   assert.equal(frames.at(-1), 'R 20 -70 0 44.5');
   timing.advance(1);
   await flush();
-  assert.equal(frames.at(-1), neutralFrame);
-  assert.match(controller.snapshot().error, /5 秒/);
+  assert.equal(frames.at(-1), 'R 20 -70 0 44.5');
+  timing.advance(60000);
+  await flush();
+  assert.equal(frames.at(-1), 'R 20 -70 0 44.5');
+  assert.equal(controller.snapshot().motionHolding, true);
+  assert.equal(controller.snapshot().error, '');
   controller.move(100, 100);
   timing.advance(1000);
   await flush();
-  assert.equal(frames.at(-1), neutralFrame);
+  assert.equal(frames.at(-1), 'R 100 -100 0 44.5');
   controller.release();
+  await flush();
+  assert.equal(frames.at(-1), neutralFrame);
+  controller.move(80, 80);
+  timing.advance(100);
+  await flush();
+  assert.equal(frames.at(-1), neutralFrame);
   controller.beginHold();
   controller.move(20, 0);
   timing.advance(100);
@@ -418,7 +428,7 @@ test('right joystick release levels roll and keeps height without interrupting m
   assert.equal(frames.at(-1), 'R 10 -25 0 68.5');
 });
 
-test('movement timeout does not cancel a later pose hold or erase its roll target', async (t) => {
+test('staggered movement and pose holds both stay active past their old deadlines', async (t) => {
   const { controller, timing, frames } = immediateController(t);
   controller.setReady(true);
   controller.arm();
@@ -431,21 +441,22 @@ test('movement timeout does not cancel a later pose hold or erase its roll targe
   controller.movePose(66.5, 12);
   timing.advance(3000);
   await flush();
-  assert.equal(frames.at(-1), 'R 0 0 12 66.5');
-  assert.equal(controller.snapshot().motionHolding, false);
+  assert.equal(frames.at(-1), 'R 20 -50 12 66.5');
+  assert.equal(controller.snapshot().motionHolding, true);
   assert.equal(controller.snapshot().poseHolding, true);
   controller.move(100, 100);
   controller.movePose(67.5, -10);
   timing.advance(100);
   await flush();
-  assert.equal(frames.at(-1), 'R 0 0 -10 67.5');
+  assert.equal(frames.at(-1), 'R 100 -100 -10 67.5');
   timing.advance(1900);
   await flush();
-  assert.equal(frames.at(-1), 'R 0 0 0 67.5');
-  assert.equal(controller.snapshot().poseHolding, false);
+  assert.equal(frames.at(-1), 'R 100 -100 -10 67.5');
+  assert.equal(controller.snapshot().poseHolding, true);
+  assert.equal(controller.snapshot().error, '');
 });
 
-test('pose timeout levels roll but keeps a later motion hold active', async (t) => {
+test('pose holds keep their targets indefinitely and accept later moves', async (t) => {
   const { controller, timing, frames } = immediateController(t);
   controller.setReady(true);
   controller.arm();
@@ -461,14 +472,21 @@ test('pose timeout levels roll but keeps a later motion hold active', async (t) 
     timing.advance(1000);
     await flush();
   }
-  assert.equal(frames.at(-1), 'R -15 -35 0 70.5');
+  assert.equal(frames.at(-1), 'R -15 -35 -11 70.5');
   assert.equal(controller.snapshot().motionHolding, true);
-  assert.equal(controller.snapshot().poseHolding, false);
+  assert.equal(controller.snapshot().poseHolding, true);
+  timing.advance(60000);
+  await flush();
+  assert.equal(frames.at(-1), 'R -15 -35 -11 70.5');
+  assert.equal(controller.snapshot().error, '');
   controller.movePose(78.5, 18);
   controller.move(25, 5);
   timing.advance(100);
   await flush();
-  assert.equal(frames.at(-1), 'R 5 -25 0 70.5');
+  assert.equal(frames.at(-1), 'R 5 -25 18 78.5');
+  controller.releasePose();
+  await flush();
+  assert.equal(frames.at(-1), 'R 5 -25 0 78.5');
 });
 
 test('global release ends both holds and resets both sticks while retaining height', async (t) => {

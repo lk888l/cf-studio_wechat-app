@@ -74,7 +74,7 @@
           </view>
         </view>
         <text class="stick-caption"
-          >{{armed && ready ? '松手停止 · 单次最多 5 秒' : '启用控制后操作'}}</text
+          >{{armed && ready ? '松手停止 · 持续操作不限时' : '启用控制后操作'}}</text
         >
       </view>
 

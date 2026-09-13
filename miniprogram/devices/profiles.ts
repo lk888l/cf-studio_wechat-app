@@ -22,8 +22,8 @@ function clamp(value: number, minimum: number, maximum: number): number {
 
 export function normalizeWl1(input: ControlState): ControlState {
   return {
-    speed: Math.round(clamp(input.speed, -100, 100)),
-    turn: Math.round(clamp(input.turn, -100, 100)),
+    speed: Math.round(clamp(input.speed, -150, 150)),
+    turn: Math.round(clamp(input.turn, -150, 150)),
     roll: Math.round(clamp(input.roll, -18, 18)),
     height: Math.round(clamp(input.height, 44.5, 78.5) * 10) / 10,
   };
@@ -76,7 +76,7 @@ export function joystickVector(
   const magnitude = Math.sqrt(x * x + y * y);
   if (!Number.isFinite(magnitude) || magnitude < 0.12) return { speed: 0, turn: 0 };
   const scale = (Math.min(1, magnitude) - 0.12) / 0.88;
-  const cap = clamp(limit, 0, 100);
+  const cap = clamp(limit, 0, 150);
   return {
     speed: Math.round((-y / magnitude) * scale * cap),
     turn: Math.round((x / magnitude) * scale * cap),
