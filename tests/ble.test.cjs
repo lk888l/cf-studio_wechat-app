@@ -221,6 +221,60 @@ test('BLE drops stale queued commands without replaying them after congestion', 
   assert.equal(f.state().status, 'ready');
 });
 
+test('SoftEngine chunks remain ordered and cannot interleave with the next command', async (t) => {
+  const f = fixture(t);
+  await f.ready();
+  const frame = '@R -100 -100 -18 78.5\n';
+  const first = f.transport.send(frame);
+  const second = f.transport.send('@R 0 0 0 44.5\n');
+  await flush();
+  assert.equal(f.calls.writes.length, 1);
+  assert.equal(Buffer.from(f.calls.writes[0].value).toString('ascii'), frame.slice(0, 20));
+  t.mock.timers.tick(25);
+  await first;
+  await flush();
+  assert.equal(f.calls.writes.length, 2);
+  assert.equal(Buffer.from(f.calls.writes[1].value).toString('ascii'), frame.slice(20));
+  t.mock.timers.tick(25);
+  await second;
+  assert.equal(Buffer.from(f.calls.writes[2].value).toString('ascii'), '@R 0 0 0 44.5\n');
+  await assert.rejects(f.transport.send('@R 0 0 0 44.5'), /ASCII/);
+  await assert.rejects(f.transport.send('@ping\n@ping\n'), /ASCII/);
+  await assert.rejects(f.transport.send('@' + 'x'.repeat(33) + '\n'), /ASCII/);
+});
+
+test('disconnect between SoftEngine chunks cancels the incomplete command', async (t) => {
+  const f = fixture(t);
+  await f.ready();
+  const sending = assert.rejects(f.transport.send('@R -100 -100 -18 78.5\n'), /会话已结束/);
+  await flush();
+  assert.equal(f.calls.writes.length, 1);
+  await f.transport.disconnect();
+  t.mock.timers.tick(100);
+  await sending;
+  assert.equal(f.calls.writes.length, 1);
+});
+
+test('a delayed first chunk cannot release a stale SoftEngine terminator', async (t) => {
+  let heldWrite;
+  const f = fixture(t, {
+    writeBLECharacteristicValue(options) {
+      heldWrite = options;
+    },
+  });
+  await f.ready();
+  const sending = assert.rejects(f.transport.send('@R -100 -100 -18 78.5\n'), /等待过久/);
+  await flush();
+  assert.ok(heldWrite);
+  t.mock.timers.tick(400);
+  heldWrite.success({});
+  await flush();
+  t.mock.timers.tick(25);
+  await sending;
+  assert.equal(f.state().status, 'error');
+  assert.equal(Buffer.from(heldWrite.value).toString('ascii').length, 20);
+});
+
 test('BLE write timeout invalidates the session and cancels queued commands', async (t) => {
   const writes = [];
   const f = fixture(t, {
@@ -401,4 +455,66 @@ test('BLE late discovery start is stopped after the caller has cancelled the sca
   await flush();
   assert.equal(f.state().status, 'idle');
   assert.equal(f.calls.stops, 1);
+});
+
+for (const short of [false, true]) {
+  test(`ZX-D30 UART excludes GPIO and pairs FFE2 with FFE1 (short=${short})`, async (t) => {
+    const uuid = (id) => (short ? id.toLowerCase() : `0000${id}-0000-1000-8000-00805F9B34FB`);
+    const f = fixture(t, {
+      getBLEDeviceServices(options) {
+        options.success({ services: [{ uuid: uuid('FFE0') }] });
+      },
+      getBLEDeviceCharacteristics(options) {
+        options.success({
+          characteristics: [
+            characteristic(uuid('FFE3'), { write: true, notify: true }),
+            characteristic(uuid('FFE2'), { write: true }),
+            characteristic(uuid('FFE1'), { write: true, notify: true }),
+          ],
+        });
+      },
+    });
+    await f.transport.connect('D30SP_126BB2');
+    assert.equal(f.state().endpoints.length, 2);
+    assert.equal(f.state().endpoints[0].writeId, uuid('FFE2'));
+    assert.equal(f.state().endpoints[0].notifyId, uuid('FFE1'));
+    assert.equal(f.state().endpoints[1].notifyId, uuid('FFE1'));
+    await f.transport.selectEndpoint(f.state().endpoints[0]);
+    assert.equal(f.calls.notify[0].characteristicId, uuid('FFE1'));
+    await f.transport.send('@ping\n');
+    assert.equal(f.calls.writes[0].characteristicId, uuid('FFE2'));
+    assert.equal(Buffer.from(f.calls.writes[0].value).toString(), '@ping\n');
+    const received = [];
+    f.transport.onReceive((text) => received.push(text));
+    for (const id of ['FFE3', 'FFE1'])
+      f.emit('BLECharacteristicValueChange', {
+        deviceId: 'D30SP_126BB2',
+        serviceId: uuid('FFE0'),
+        characteristicId: uuid(id),
+        value: Uint8Array.from(Buffer.from('pong\n')).buffer,
+      });
+    assert.deepEqual(received, ['pong\n']);
+  });
+}
+
+test('ZX-D30 never substitutes GPIO notification when UART notify is missing', async (t) => {
+  const f = fixture(t, {
+    getBLEDeviceServices(options) {
+      options.success({ services: [{ uuid: 'FFE0' }] });
+    },
+    getBLEDeviceCharacteristics(options) {
+      options.success({
+        characteristics: [
+          characteristic('FFE2', { writeNoResponse: true }),
+          characteristic('FFE3', { write: true, notify: true }),
+        ],
+      });
+    },
+  });
+  await f.transport.connect('robot');
+  assert.equal(f.state().endpoints.length, 1);
+  assert.equal(f.state().endpoints[0].notifyId, undefined);
+  await f.transport.selectEndpoint(f.state().endpoints[0]);
+  assert.equal(f.calls.notify.length, 0);
+  assert.match(f.state().error, /未启用返回通知/);
 });

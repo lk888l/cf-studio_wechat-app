@@ -58,7 +58,7 @@ Page({
     error: '',
     logs: [] as LogEntry[],
     helpOpen: false,
-    profileNames: ['WL1 · main（已适配）', 'WL1 · SoftEngine（待验证）'],
+    profileNames: ['WL1 · main（已适配）', 'WL1 · SoftEngine（串口适配）'],
     profileIndex: 0,
   },
   transport: null as BleTransport | null,
@@ -111,7 +111,7 @@ Page({
         if (this.destroyed) return;
         const ready =
           this.visible &&
-          this.data.profileIndex === 0 &&
+          deviceProfiles[this.data.profileIndex].supported &&
           (this.data.demo || ble.status === 'ready');
         if (ble.deviceId !== this.data.ble.deviceId) {
           this.setData({ lastReceive: '', lastReceiveAt: '', receiveCount: 0 });
@@ -147,7 +147,7 @@ Page({
   onShow() {
     this.visible = true;
     if (this.data.demo && !this.suspension) {
-      const ready = this.data.profileIndex === 0;
+      const ready = deviceProfiles[this.data.profileIndex].supported;
       this.controller?.setReady(ready);
       this.setData({ ready });
     }
@@ -192,7 +192,8 @@ Page({
       .finally(() => {
         this.suspension = null;
         if (!this.destroyed) {
-          const ready = this.visible && this.data.demo && this.data.profileIndex === 0;
+          const ready =
+            this.visible && this.data.demo && deviceProfiles[this.data.profileIndex].supported;
           this.controller?.setReady(ready);
           this.setData({ busy: false, ready });
         }
@@ -239,7 +240,7 @@ Page({
       this.controller?.setReady(false);
       if (!this.visible || this.destroyed) return;
       const demo = !this.data.demo;
-      const ready = demo && this.data.profileIndex === 0;
+      const ready = demo && deviceProfiles[this.data.profileIndex].supported;
       this.setData({
         demo,
         ready,
@@ -450,12 +451,15 @@ Page({
     if (!deviceProfiles[index] || this.data.busy) return;
     void this.perform(async () => {
       await this.controller?.stop();
-      const ready = index === 0 && (this.data.demo || this.data.ble.status === 'ready');
+      if (!this.visible || this.destroyed) return;
+      this.controller?.setProfile(deviceProfiles[index]);
+      const ready =
+        deviceProfiles[index].supported && (this.data.demo || this.data.ble.status === 'ready');
       this.controller?.setReady(ready);
       this.setData({
         profileIndex: index,
         ready,
-        error: index ? 'SoftEngine 暂为扩展占位，验证前禁用控制。' : '',
+        error: '',
       });
     });
   },

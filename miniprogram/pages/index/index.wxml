@@ -238,10 +238,10 @@
       <view class="compatibility-note"
         ><view class="notice-icon">i</view
         ><view
-          ><text class="notice-title">当前 JDY-31 不能由微信小程序直连</text
+          ><text class="notice-title">ZX-D30 · 微信 BLE 遥控</text
           ><text class="notice-copy"
-            >已实测 JDY-31（Bluetooth 3.0 / SPP），与常见 HC-05 一样属于经典蓝牙串口。请使用支持 BLE
-            GATT 的串口透传模块。</text
+            >搜索 D30SP_126BB2（其他版本可能为 D30LE_ 开头）；使用 FFE0 服务的 FFE1 或 FFE2
+            透传通道，返回通知为 FFE1。</text
           ></view
         ></view
       >
@@ -338,19 +338,22 @@
               ><view class="help-section"
                 ><text class="help-title">01 / 串口透传接线</text
                 ><text
-                  >模块 TX → 小车 PA10（RX）；模块 RX → 小车 PA15（TX）；GND 共地。小车串口为 115200
-                  / 8N1。供电与 IO 电平以模块资料为准。</text
+                  >模块 TX → 小车 PA10（RX）；模块 RX → 小车 PA15（TX）；GND 共地。本次 SoftEngine
+                  固件默认 9600 / 8N1，需与模块串口设置一致。供电与 IO 电平以模块资料为准。</text
                 ></view
               ><view class="help-section"
                 ><text class="help-title">02 / 当前适配范围</text
                 ><text
-                  >当前适配 WL1 主分支。SoftEngine 尚未验证，暂不开放控制。COM3 实测 JDY-31-V1.35
-                  串口为 9600，与小车 115200 不一致；更换 BLE 模块后也需匹配小车串口参数。</text
+                  >烧录本次固件后选择 SoftEngine，连接 ZX-D30（本机名称 D30SP_126BB2）。 FFE1/FFE2
+                  用于透传，FFE3 用于模块 IO 控制，不用于小车遥控。</text
                 ></view
               ><view class="help-section"
                 ><text class="help-title">03 / 双摇杆与失联</text
                 ><text
-                  >左杆松手停止行进与转向；右杆松手保持腿高、横滚回正。本地控制开关只限制本页面操作。主分支没有失联超时保护，退后台或蓝牙断开后可能继续执行最后指令。请先停止，再断开，并保留可触及的物理断电方式。</text
+                  >左杆松手停止行进与转向；右杆松手保持腿高、横滚回正。本地控制开关只限制本页面操作。本次
+                  SoftEngine 固件在 500
+                  毫秒无有效运动指令后将速度、转向、横滚归零，保持腿高并继续平衡。旧 main
+                  没有此保护。停止运动不等于断电。</text
                 ></view
               ><view class="help-section"
                 ><text class="help-title">04 / 目标与设备回传</text

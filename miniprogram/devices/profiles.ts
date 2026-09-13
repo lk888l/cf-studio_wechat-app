@@ -38,6 +38,10 @@ export function encodeWl1(input: ControlState): string {
   return frame;
 }
 
+export function encodeWl1SoftEngine(input: ControlState): string {
+  return `@${encodeWl1(input)}\n`;
+}
+
 export const wl1Main: DeviceProfile = {
   id: 'wl1-main',
   name: 'WL1 · main',
@@ -55,10 +59,8 @@ export const deviceProfiles: readonly DeviceProfile[] = [
     ...wl1Main,
     id: 'wl1-softengine',
     name: 'WL1 · SoftEngine',
-    supported: false,
-    encode() {
-      throw new Error('SoftEngine 固件尚未完成真机适配，请使用 main 配置');
-    },
+    supported: true,
+    encode: encodeWl1SoftEngine,
   },
 ];
 

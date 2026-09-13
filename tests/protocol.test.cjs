@@ -92,11 +92,18 @@ test('joystick forward, backward, lateral and dead-zone behavior follow user dir
   assert.ok(Math.hypot(diagonal.speed, diagonal.turn) <= 31);
 });
 
-test('future SoftEngine is visible but cannot be silently used as a validated device', () => {
+test('SoftEngine uses explicit framing while main keeps its legacy wire format', () => {
   const profile = deviceProfiles.find((item) => item.id === 'wl1-softengine');
-  assert.ok(profile);
-  assert.equal(profile.supported, false);
-  assert.throws(() => profile.encode(wl1Main.initial));
+  assert.ok(profile && profile.supported);
+  for (const speed of [-100, 0, 100]) {
+    for (const turn of [-100, 0, 100]) {
+      for (const roll of [-18, 0, 18]) {
+        const input = { speed, turn, roll, height: 78.5 };
+        assert.equal(profile.encode(input), `@${encodeWl1(input)}\n`);
+        assert.ok(Buffer.byteLength(profile.encode(input), 'ascii') <= 22);
+      }
+    }
+  }
 });
 
 test('leg joystick center and its axis dead zones preserve the gesture anchor height', () => {

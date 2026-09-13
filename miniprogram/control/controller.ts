@@ -36,7 +36,7 @@ export class RemoteController {
   private stopping = false;
 
   constructor(
-    private readonly profile: DeviceProfile,
+    private profile: DeviceProfile,
     private readonly write: (frame: string) => Promise<void>,
     private readonly onSent: (frame: string) => void = () => undefined,
     private readonly timing: ControllerClock = clock,
@@ -84,6 +84,16 @@ export class RemoteController {
       control: neutral(this.state.control),
       error: '',
     };
+    this.emit();
+  }
+
+  setProfile(profile: DeviceProfile): void {
+    if (this.state.armed || this.drainPromise || this.stopping)
+      throw new Error('请等待停止指令发送完成后切换固件');
+    this.setReady(false);
+    this.profile = profile;
+    this.state.control = profile.normalize(neutral(this.state.control));
+    this.state.lastFrame = '';
     this.emit();
   }
 

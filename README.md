@@ -1,21 +1,33 @@
 # CF Studio · 蓝牙遥控台
 
-原生微信小程序 + 严格 TypeScript。首个设备为 WL1 轮腿机器人，适配 `main` 的 ASCII 串口协议。无需登录、云端服务或运行时 npm 依赖；没有用户资料采集。
+原生微信小程序 + 严格 TypeScript。首个设备为 WL1 轮腿机器人，支持旧 `main` 的 ASCII 协议及本次 `SoftEngine` 的分帧串口协议。无需登录、云端服务或运行时 npm 依赖；没有用户资料采集。
 
-## 当前硬件结论
+## 当前 ZX-D30 适配（2026-09-13）
 
-2026-09-08 通过用户授权的 CH343 / COM3 实测，现有模块回复 **JDY-31-V1.35 / Bluetooth V3.0 / JDY-31-SPP**，当前 UART 为 **9600 8N1**。这款模块使用经典蓝牙 SPP，**不能通过微信小程序的 BLE GATT 接口直接连接**。PC 串口查询成功不代表手机小程序能连接。
+当前模块已更换为 **ZX-D30_V1.2.7 / D30SP_126BB2**，UART **9600 8N1**。
+已通过电脑 BLE 适配器完成模块与 STM32 的实际双向透传、分包命令和超时归零测试。
+微信端选择 **WL1 · SoftEngine**，搜索 **D30SP_126BB2**，确认 FFE0 服务、FFE2 写入和 FFE1 通知；FFE1 写入也可用。
+本次修正 FFE2 的通知配对并排除 FFE3 IO 控制通道，支持短 / 完整 UUID。
+手机微信真机遥控尚未验证。详情见 [ZX-D30 联调记录](docs/zx-d30.md)。
 
-保留微信小程序时，需要提供 UART 透传服务的 BLE 模块，或支持 BLE 的双模模块；车端配置为 **115200 8N1**。若保留 JDY-31，需要支持 SPP 的原生 Android 客户端或额外桥接硬件，这部分未在本工程实现。没有改动现有模块配置或固件。
+下节为 2026-09-12 JDY-31 适配历史；旧 SPP 结论不代表当前 ZX-D30。
 
-详细证据：[COM3 实测](docs/hardware-check.md)、[厂商资料](https://telesky.yuque.com/bdys8w/01/hao54g0d16drugbe?singleDoc)、[微信 BLE API](https://developers.weixin.qq.com/miniprogram/dev/api/device/bluetooth-ble/wx.createBLEConnection.html)。资料中孤立的“BLE 连接后电流”一行与型号/协议表不一致，不能据此认定支持 BLE。
+## 本次 SoftEngine 适配（2026-09-12）
+
+烧录本次固件后选择 `WL1 · SoftEngine`；旧 main 继续使用原配置。SoftEngine 发送
+`@R ...\n`，可跨 BLE 写入分包，接收端只在收齐后执行；完整帧须在 300 ms 内收齐。
+固件默认关闭 nRF，串口或无线不可用也会启动平衡和腿部控制。运动指令超过 500 ms
+未更新时，速度、转向、横滚归零，保持腿高并继续平衡；调参不会延长运动指令寿命。
+
+此适配不会把 JDY-31 的 SPP 转换成 BLE，微信仍需兼容的 BLE 串口模块。主机测试与
+板上注入测试通过，手机实际蓝牙链路尚未验证，详见 [SoftEngine 串口说明](docs/softengine-uart.md)。
 
 ## 运行
 
 1. 在微信开发者工具中导入本目录，使用已有 `project.config.json` 的 AppID；已启用 TypeScript 编译。
 2. 遥控台固定横屏显示，采用左摇杆、中间参数屏、右摇杆的手柄布局。先打开顶部 `SIM`，启用本地控制后体验双摇杆；模拟模式不会调用 BLE 写入。
-3. 换上兼容模块并匹配 UART 参数后，用手机真机调试：进入连接页 → 搜索 BLE → 选择设备 → 根据模块手册确认 UART 服务和写特征 → 启用控制。
-4. 开发者工具模拟器不等价于手机蓝牙环境；当前尚未完成兼容 BLE 模块与小车的真机联调。
+3. 选择 SoftEngine，用手机真机调试：进入连接页 → 搜索 D30SP_126BB2 → 确认 FFE0 / FFE2 / FFE1 → 启用控制。
+4. 开发者工具模拟器不等价于手机蓝牙环境；已完成电脑 BLE 与小车实测，手机微信端仍需真机验证。
 
 工程质量检查：
 
@@ -56,13 +68,13 @@ transport/ble           扫描、连接、服务/特征发现、串行写入、�
 services/lifecycle      App 后台事件转发
 ```
 
-WL1 使用 `R <turn> <velocity> <roll> <height>`，前进速度在编码时取反。速度/转向/横滚使用整数，高度保留一位小数。最大帧 `R -100 -100 -18 78.5` 为 20 字节，不附加 CR/LF/补零。
+WL1 main 使用 `R <turn> <velocity> <roll> <height>`，前进速度在编码时取反。速度/转向/横滚使用整数，高度保留一位小数。最大帧 `R -100 -100 -18 78.5` 为 20 字节，不附加 CR/LF/补零。
 
 主分支按 UART receive-to-idle 整块解析，不能跨包拼接，也不能拆解多条合并命令。每条命令只调用一次 BLE write，帧间至少留 25 ms，控制周期 100 ms；不把一帧切为多个 20 字节包。BLE 模块是否保持完整 UART 输出仍需示波器/串口抓取与小车实测。
 
 控制器始终最多一条正在发送和一份可替换的最新目标，停止覆盖待发运动。写入超时后关闭会话，不重放积压指令。后台尝试归零后断开连接，无法保证系统暂停前回调一定完成。
 
-新增设备时实现 `DeviceProfile` 并注册到 `deviceProfiles`，为其添加语义控制与协议测试。`WL1 · SoftEngine` 目前是禁用占位：已审计差异，但不冒充完成适配；后续可独立增加状态解析和设备能力，不能直接混发其命令。完整协议依据、提交 ID 和代码行号见 [固件协议审计](docs/firmware-protocol.md)。
+新增设备时实现 `DeviceProfile` 并注册到 `deviceProfiles`，为其添加语义控制与协议测试。`WL1 · SoftEngine` 已接入分帧编码；切换配置先归零并停用控制，需要手动重新启用。后续可独立增加状态解析和设备能力。完整协议依据、提交 ID 和代码行号见 [固件协议审计](docs/firmware-protocol.md)。
 
 ## 真机验收
 

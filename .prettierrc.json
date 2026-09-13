@@ -2,6 +2,7 @@
   "singleQuote": true,
   "semi": true,
   "printWidth": 100,
+  "endOfLine": "auto",
   "overrides": [
     { "files": "*.wxml", "options": { "parser": "html" } },
     { "files": "*.wxss", "options": { "parser": "css" } }

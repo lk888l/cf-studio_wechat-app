@@ -32,8 +32,12 @@ const WRITE_TIMEOUT_MS = 2000;
 const FRAME_GAP_MS = 25;
 // An old steering command must never be replayed after congestion clears.
 const MAX_QUEUE_AGE_MS = 350;
+const normalizeUuid = (uuid: string): string => {
+  const upper = uuid.toUpperCase();
+  return /^[0-9A-F]{4}$/.test(upper) ? `0000${upper}-0000-1000-8000-00805F9B34FB` : upper;
+};
 const sameUuid = (first: string, second: string): boolean =>
-  first.toUpperCase() === second.toUpperCase();
+  normalizeUuid(first) === normalizeUuid(second);
 
 function errorMessage(reason: unknown, action: string): string {
   if (reason instanceof Error) return reason.message;
@@ -319,9 +323,15 @@ export class BleTransport {
 
   async send(frame: string): Promise<void> {
     this.assertAlive();
-    // One write must contain exactly one firmware command; never split or coalesce frames.
-    if (!frame.length || frame.length > 20 || /[^\x00-\x7f]/.test(frame)) {
-      throw new Error('串口命令必须为 1–20 字节 ASCII，不能分包发送');
+    // Legacy idle-delimited commands still require one write. Only explicitly
+    // framed SoftEngine commands can span multiple 20-byte GATT writes.
+    const framed = /^@[^@\r\n\0]{1,32}\r?\n$/.test(frame);
+    if (
+      !frame.length ||
+      /[^\x00-\x7f]/.test(frame) ||
+      (frame.startsWith('@') ? !framed : frame.length > 20)
+    ) {
+      throw new Error('串口命令须为 ASCII：旧协议最多 20 字节，SoftEngine 使用 @命令\\n 分帧');
     }
     if (this.state.status !== 'ready' || !this.state.endpoint)
       throw new Error('蓝牙尚未就绪，请先连接并确认 UART 特征');
@@ -340,24 +350,31 @@ export class BleTransport {
       const bytes = new Uint8Array(frame.length);
       for (let index = 0; index < frame.length; index++) bytes[index] = frame.charCodeAt(index);
       try {
-        await this.call<WechatMiniprogram.GeneralCallbackResult>(
-          '发送串口命令',
-          (callbacks) => {
-            const options: ModernWrite = {
-              deviceId,
-              serviceId: endpoint.serviceId,
-              characteristicId: endpoint.writeId,
-              value: bytes.buffer,
-              writeType: endpoint.writeType,
-              ...callbacks,
-            };
-            wx.writeBLECharacteristicValue(options);
-          },
-          WRITE_TIMEOUT_MS,
-          session,
-        );
-        this.checkSession(session);
-        this.lastWriteFinished = Date.now();
+        for (let offset = 0; offset < bytes.length; offset += 20) {
+          if (offset) await this.pause(FRAME_GAP_MS, session);
+          this.checkSession(session);
+          if (offset && Date.now() - queuedAt > MAX_QUEUE_AGE_MS)
+            throw new Error('分帧发送等待过久，已取消剩余数据');
+          const chunk = bytes.slice(offset, offset + 20);
+          await this.call<WechatMiniprogram.GeneralCallbackResult>(
+            '发送串口命令',
+            (callbacks) => {
+              const options: ModernWrite = {
+                deviceId,
+                serviceId: endpoint.serviceId,
+                characteristicId: endpoint.writeId,
+                value: chunk.buffer,
+                writeType: endpoint.writeType,
+                ...callbacks,
+              };
+              wx.writeBLECharacteristicValue(options);
+            },
+            WRITE_TIMEOUT_MS,
+            session,
+          );
+          this.checkSession(session);
+          this.lastWriteFinished = Date.now();
+        }
       } catch (reason) {
         if (this.isCurrent(session))
           this.failSession(`${errorMessage(reason, '发送串口命令')}；已停止发送，请重新连接`);
@@ -477,11 +494,15 @@ export class BleTransport {
     characteristics: WechatMiniprogram.BLECharacteristic[],
   ): BleEndpoint[] {
     const notifications = characteristics.filter(
-      (item) => item.properties.notify || item.properties.indicate,
+      (item) =>
+        (item.properties.notify || item.properties.indicate) &&
+        !(sameUuid(serviceId, 'FFE0') && sameUuid(item.uuid, 'FFE3')),
     );
     return characteristics
       .filter((item) => {
         const properties: ModernProperties = item.properties;
+        // ZX-D30 FFE3 controls module GPIO/settings; it is not UART data.
+        if (sameUuid(serviceId, 'FFE0') && sameUuid(item.uuid, 'FFE3')) return false;
         return properties.write || properties.writeNoResponse;
       })
       .map((characteristic) => {
@@ -493,16 +514,21 @@ export class BleTransport {
                 sameUuid(item.uuid, '6E400003-B5A3-F393-E0A9-E50E24DCCA9E'),
               )
             : undefined;
+        const zxD30Notify =
+          sameUuid(serviceId, 'FFE0') && sameUuid(characteristic.uuid, 'FFE2')
+            ? notifications.find((item) => sameUuid(item.uuid, 'FFE1'))
+            : undefined;
         const paired =
           notifications.find((item) => sameUuid(item.uuid, characteristic.uuid)) ||
           nordicNotify ||
+          zxD30Notify ||
           (notifications.length === 1 ? notifications[0] : undefined);
         return {
           serviceId,
           writeId: characteristic.uuid,
           notifyId: paired ? paired.uuid : undefined,
           writeType: properties.write ? 'write' : 'writeNoResponse',
-          label: `服务 ${serviceId} / 写入 ${characteristic.uuid}${paired ? ' · 有返回通知' : ' · 仅发送'}`,
+          label: `${sameUuid(serviceId, 'FFE0') && (sameUuid(characteristic.uuid, 'FFE1') || sameUuid(characteristic.uuid, 'FFE2')) ? 'ZX-D30 透传 · ' : ''}服务 ${serviceId} / 写入 ${characteristic.uuid}${paired ? ' · 有返回通知' : ' · 仅发送'}`,
         };
       });
   }

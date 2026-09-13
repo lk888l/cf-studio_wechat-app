@@ -4,3 +4,6 @@ node_modules
 typings
 project.private.config.json
 package-lock.json
+
+# WeChat DevTools maintains its project settings formatting.
+project.config.json

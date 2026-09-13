@@ -96,7 +96,9 @@ test('arming requires a ready, explicitly supported device and starts with neutr
   assert.equal(controller.snapshot().armed, true);
 
   const future = deviceProfiles.find((item) => item.id === 'wl1-softengine');
-  const unsupported = new RemoteController(future, async () => assert.fail('unsupported write'));
+  const unsupported = new RemoteController({ ...future, supported: false }, async () =>
+    assert.fail('unsupported write'),
+  );
   t.after(() => unsupported.dispose());
   unsupported.setReady(true);
   assert.throws(() => unsupported.arm());

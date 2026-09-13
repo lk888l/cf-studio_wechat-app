@@ -266,24 +266,30 @@ test('page unload sends neutral, disconnects and releases all BLE listeners', as
   assert.equal(f.calls.writes.length, sent);
 });
 
-test('page SoftEngine selection disarms, sends neutral and prevents further commands', async (t) => {
+test('page profile switch sends old neutral and uses the new format only after rearming', async (t) => {
   const f = fixture(t);
   await f.connected();
   await f.move();
   f.page.onProfileChange({ detail: { value: 1 } });
   await f.advance();
   assert.equal(f.page.data.profileIndex, 1);
-  assert.equal(f.page.data.ready, false);
+  assert.equal(f.page.data.ready, true);
   assert.equal(f.page.data.armed, false);
-  assert.match(f.page.data.error, /SoftEngine/);
   assert.ok(isNeutral(f.calls.writes.at(-1).text));
   const sent = f.calls.writes.length;
-  f.page.toggleArmed();
-  f.page.onJoystickStart(touchEvent([touch(7)]));
-  f.page.onHeightChange({ detail: { value: 700 } });
   await f.advance(1000);
   assert.equal(f.calls.writes.length, sent);
+  f.page.toggleArmed();
+  await f.advance();
+  assert.equal(f.page.data.armed, true);
+  assert.match(f.calls.writes.at(-1).text, /^@R 0 0 0 [0-9.]+\n$/);
+  f.page.onProfileChange({ detail: { value: 0 } });
+  await f.advance();
   assert.equal(f.page.data.armed, false);
+  assert.equal(f.page.data.profileIndex, 0);
+  f.page.toggleArmed();
+  await f.advance();
+  assert.ok(isNeutral(f.calls.writes.at(-1).text));
 });
 
 test('page onHide cancels pending connection and cannot be revived by its late callback', async (t) => {
