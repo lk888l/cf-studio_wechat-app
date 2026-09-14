@@ -8,6 +8,7 @@ const {
 
 test('tuning commands match car handlers, without VOFA radio wrappers or incorrect roll option', () => {
   assert.equal(encodeTuning('wl1-main', 'angle-bias', '12.6'), 'anglebias 12.6');
+  assert.equal(encodeTuning('wl1-main', 'motor-deadzone', '75'), 'deadzone 75');
   assert.equal(encodeTuning('wl1-main', 'angle-d', '-10.1'), 'anglepid -d -10.1');
   assert.equal(encodeTuning('wl1-main', 'velocity-i', '0.008'), 'velocitypid -i 0.008');
   assert.equal(encodeTuning('wl1-main', 'difference-i', '0.001'), 'differpid -i 0.001');
@@ -20,6 +21,35 @@ test('tuning commands match car handlers, without VOFA radio wrappers or incorre
   assert.equal(encodeTuning('wl1-softengine', 'roll-p', '-0.4'), '@rollpid -p -0.4\n');
   assert.equal(encodeTuning('wl1-softengine', 'roll-d', '0.1'), '@rollpid -d 0.1\n');
   assert.equal(encodeAutoAngleKp('wl1-softengine'), '@anglepid -auto\n');
+  assert.equal(encodeTuning('wl1-softengine', 'motor-deadzone', '0'), '@deadzone 0\n');
+});
+
+test('balance group exposes one shared bounded integer motor dead-zone control', () => {
+  const balance = tuningGroups('wl1-main')[0];
+  assert.equal(balance.name, '重心标定与电机输出死区');
+  const deadzone = balance.parameters.find((parameter) => parameter.id === 'motor-deadzone');
+  assert.deepEqual(
+    {
+      label: deadzone.label,
+      command: deadzone.command,
+      minimum: deadzone.minimum,
+      maximum: deadzone.maximum,
+      step: deadzone.step,
+      digits: deadzone.digits,
+      initial: deadzone.initial,
+    },
+    {
+      label: '电机输出死区 / PWM',
+      command: 'deadzone',
+      minimum: 0,
+      maximum: 1000,
+      step: 1,
+      digits: 0,
+      initial: 0,
+    },
+  );
+  for (const value of ['-1', '1001', '50.5', '50junk'])
+    assert.throws(() => encodeTuning('wl1-main', 'motor-deadzone', value));
 });
 
 test('every selectable parameter value fits its transport, including values just below powers of ten', () => {

@@ -546,9 +546,9 @@
       <scroll-view class="parameter-scroll" scroll-y enhanced>
         <view class="parameter-content">
           <text class="section-description"
-            >一次保存重心基准、姿态 / 速度 / 差速 / 腿部 PID 的
-            P/I/D，以及车端当前腿高和横滚目标。写入 STM32
-            Flash，断电后自动恢复；速度、转向和电机输出不保存。</text
+            >一次保存重心基准、电机输出死区、姿态 / 速度 / 差速 / 腿部 PID 的
+            P/I/D，以及车端当前腿高和横滚目标。写入 STM32 Flash，断电后自动恢复；速度、转向和当前
+            PWM 输出不保存。</text
           >
           <text class="parameter-note"
             >支持运行时直接保存，无需关闭控制或发送全部参数。只想修改部分参数时，发送对应项即可，其余沿用小车当前值。</text
