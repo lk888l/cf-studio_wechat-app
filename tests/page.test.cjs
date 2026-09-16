@@ -1118,3 +1118,53 @@ test('page exposes raw received serial text without treating command targets as 
   assert.equal(f.page.data.receiveCount, received.count);
   assert.equal(f.page.data.logs.filter((log) => log.direction === 'RX').length, existingRx);
 });
+
+test('installation page confirms state, blocks local arming and keeps lock across tabs', async (t) => {
+  const f = fixture(t);
+  await f.connected();
+  f.page.switchTab(datasetEvent({ tab: 'installation' }));
+  await f.advance(100);
+  await f.advance(100);
+  assert.equal(f.page.data.tab, 'installation');
+  f.page.installationService.receive('install: active=0 ready=0 height=44.5 control=on\n');
+  await f.advance(100);
+  await f.advance(100);
+  f.page.enterInstallation();
+  await f.advance(100);
+  await f.advance(100);
+  assert.equal(f.page.data.installation.status, null);
+  assert.equal(f.page.data.installationLock, true);
+  f.page.installationService.receive('install: active=1 ready=1 height=44.5 control=off\n');
+  await f.advance(100);
+  await f.advance(100);
+  f.page.switchTab(datasetEvent({ tab: 'control' }));
+  await f.advance(100);
+  await f.advance(100);
+  f.page.toggleArmed();
+  assert.equal(f.page.data.armed, false);
+  assert.match(f.page.data.error, /安装/);
+  assert.equal(
+    f.calls.writes.some((w) => w.text === 'install off\n'),
+    false,
+  );
+  f.page.finishInstallation();
+  await f.advance(100);
+  await f.advance(100);
+  f.page.installationService.receive('install: active=0 ready=0 height=44.5 control=off\n');
+  await f.advance(100);
+  await f.advance(100);
+  assert.equal(f.page.data.installationLock, false);
+  assert.equal(
+    f.calls.writes.some((w) => w.text === 'control on\n'),
+    false,
+  );
+});
+test('installation in simulation sends no physical BLE commands', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  f.page.switchTab(datasetEvent({ tab: 'installation' }));
+  f.page.enterInstallation();
+  await flush();
+  assert.equal(f.calls.writes.length, 0);
+  assert.equal(f.page.data.installation.status, null);
+});

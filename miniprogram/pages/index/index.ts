@@ -1,6 +1,7 @@
 import { RemoteController } from '../../control/controller';
 import { joystickVector, legJoystickVector, wl1Main } from '../../devices/profiles';
 import { parseTuningValue, tuningGroups } from '../../devices/tuning';
+import { InstallationService, InstallationSnapshot } from '../../services/installation';
 import { onBackground } from '../../services/lifecycle';
 import { ParameterService, ParameterSnapshot } from '../../services/parameters';
 import { BleState, BleTransport } from '../../transport/ble';
@@ -79,6 +80,13 @@ Page({
     tuningGroups: createTuningGroups(wl1Main.id),
     tuningBusy: '',
     tuningMessage: '',
+    installation: {
+      busy: '',
+      status: null,
+      message: '连接设备后查询安装状态',
+      success: false,
+    } as InstallationSnapshot,
+    installationLock: false,
     parameterPanelOpen: false,
     parameterPreparing: false,
     parameterAvailable: false,
@@ -86,6 +94,7 @@ Page({
   },
   transport: null as BleTransport | null,
   controller: null as RemoteController | null,
+  installationService: null as InstallationService | null,
   parameterService: null as ParameterService | null,
   subscriptions: [] as Array<() => void>,
   touchId: null as number | null,
@@ -128,6 +137,20 @@ Page({
         if (this.destroyed) return;
         this.setData({ parameters });
         if (!parameters.busy && parameters.message) this.addLog('INFO', parameters.message);
+      },
+    );
+    this.installationService = new InstallationService(
+      async (frame, onStart) => {
+        if (!this.data.parameterAvailable || !this.transport)
+          throw new Error('请连接真实设备后操作');
+        await this.transport.send(frame, onStart);
+        this.addLog('TX', frame);
+      },
+      (installation) => {
+        if (this.destroyed) return;
+        this.setData({ installation });
+        if (installation.status) this.setData({ installationLock: installation.status.active });
+        if (!installation.busy && installation.message) this.addLog('INFO', installation.message);
       },
     );
     this.controller = new RemoteController(
@@ -175,6 +198,7 @@ Page({
         ) {
           this.resetTuning();
           this.resetParameters();
+          this.installationService?.reset();
         }
         this.setData({
           ble,
@@ -195,7 +219,10 @@ Page({
           receiveCount: this.data.receiveCount + 1,
         });
         this.addLog('RX', text);
-        if (this.visible) this.parameterService?.receive(text);
+        if (this.visible) {
+          this.parameterService?.receive(text);
+          this.installationService?.receive(text);
+        }
       }),
     );
     this.subscriptions.push(
@@ -239,6 +266,7 @@ Page({
   async suspend(): Promise<void> {
     if (this.suspension) return this.suspension;
     this.visible = false;
+    this.installationService?.reset();
     this.resetParameters();
     this.setData({ parameterAvailable: false, parameterPanelOpen: false });
     this.clearJoysticks();
@@ -292,9 +320,10 @@ Page({
     this.resetParameters();
     this.releaseJoysticks();
     const tab = String(event.currentTarget.dataset.tab);
-    if (['control', 'connection', 'console'].includes(tab)) {
+    if (['control', 'connection', 'console', 'installation'].includes(tab)) {
       if (tab !== 'control') void this.controller?.stop();
       this.setData({ tab });
+      if (tab === 'installation') void this.operateInstallation('query');
     }
   },
 
@@ -364,7 +393,43 @@ Page({
     });
   },
 
+  async operateInstallation(action: 'on' | 'off' | 'query'): Promise<void> {
+    if (!this.canOperateParameters() || this.data.installation.busy) return;
+    this.setData({ busy: true, error: '' });
+    const service = this.installationService;
+    const deviceId = this.data.ble.deviceId;
+    try {
+      if (action !== 'query') {
+        this.clearJoysticks();
+        await this.controller?.stop();
+        if (
+          this.destroyed ||
+          !this.visible ||
+          !this.data.parameterAvailable ||
+          deviceId !== this.data.ble.deviceId
+        )
+          return;
+        if (action === 'on') this.setData({ installationLock: true });
+        await service?.set(action === 'on');
+      } else await service?.query();
+    } finally {
+      if (!this.destroyed && !this.suspension) this.setData({ busy: false });
+    }
+  },
+  enterInstallation() {
+    void this.operateInstallation('on');
+  },
+  finishInstallation() {
+    void this.operateInstallation('off');
+  },
+  queryInstallation() {
+    void this.operateInstallation('query');
+  },
   toggleArmed() {
+    if (!this.data.demo && this.data.installationLock) {
+      this.setData({ error: '请先在安装页面确认退出安装模式' });
+      return;
+    }
     if (
       this.data.busy ||
       this.data.parameters.busy ||
@@ -684,7 +749,8 @@ Page({
       !this.data.busy &&
       !this.data.tuningBusy &&
       !this.data.parameters.busy &&
-      !this.data.parameterPreparing
+      !this.data.parameterPreparing &&
+      !this.data.installation.busy
     );
   },
   queryParameters() {
@@ -731,6 +797,10 @@ Page({
     }
   },
   enableFirmwareControl() {
+    if (this.data.installationLock) {
+      this.setData({ error: '请先在安装页面退出安装模式' });
+      return;
+    }
     if (this.canOperateParameters()) void this.parameterService?.control(true);
   },
   clearLogs() {

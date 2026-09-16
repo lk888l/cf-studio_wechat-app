@@ -1,13 +1,5 @@
 <view class="gamepad-shell">
   <view class="topbar">
-    <view class="brand"
-      ><view class="brand-mark"><view></view><view></view><view></view></view
-      ><text class="brand-name">CF STUDIO</text><text class="model-name">WL1</text></view
-    >
-    <view class="connection-status"
-      ><view class="status-dot {{ready ? 'status-dot-ready' : ''}}"></view
-      ><text>{{statusLabel}}</text></view
-    >
     <view class="topbar-actions">
       <button
         class="nav-button {{tab === 'control' ? 'nav-active' : ''}}"
@@ -29,6 +21,13 @@
         bindtap="switchTab"
       >
         日志
+      </button>
+      <button
+        class="nav-button {{tab === 'installation' ? 'nav-active' : ''}}"
+        data-tab="installation"
+        bindtap="switchTab"
+      >
+        安装
       </button>
     </view>
     <view class="demo-control"
@@ -323,12 +322,6 @@
         ><text class="stop-detail">目标归零</text>
       </button>
     </view>
-    <view class="status-line {{error || ble.error ? 'status-line-error' : ''}}"
-      ><text wx:if="{{error || ble.error}}" class="status-message">{{error || ble.error}}</text
-      ><text wx:else class="status-message"
-        >主分支无失联超时保护 · 请先停止再断开 · 停止不会断电</text
-      ><text class="status-code">{{demo ? 'LOCAL SIMULATION' : 'WL1 / UART CONTROL'}}</text></view
-    >
   </view>
 
   <scroll-view
@@ -493,7 +486,13 @@
     </view>
   </scroll-view>
 
-  <scroll-view wx:else class="side-scroll" scroll-y enhanced show-scrollbar="{{false}}">
+  <scroll-view
+    wx:elif="{{tab === 'console'}}"
+    class="side-scroll"
+    scroll-y
+    enhanced
+    show-scrollbar="{{false}}"
+  >
     <view class="side-content console-content"
       ><view class="side-page-heading"
         ><view
@@ -536,6 +535,106 @@
       ><text class="console-note">蓝牙写入成功不等于设备动作已确认。</text></view
     >
   </scroll-view>
+
+  <scroll-view
+    wx:elif="{{tab === 'installation'}}"
+    class="side-scroll"
+    scroll-y
+    enhanced
+    show-scrollbar="{{false}}"
+  >
+    <view class="side-content installation-content">
+      <view class="side-page-heading"
+        ><view>
+          <text class="eyebrow">LEG SERVO INSTALLATION</text>
+          <text class="section-title">腿部舵机安装</text> </view
+        ><view class="small-badge">最低腿高 · 44.5 mm</view></view
+      >
+      <view class="panel installation-panel">
+        <text class="panel-title"
+          >{{!installation.status ? '等待设备确认' : installation.status.active ?
+          (installation.status.ready ? '已锁定安装位置' : '正在到位') : '未启用安装模式'}}</text
+        >
+        <text class="installation-message">{{installation.message}}</text>
+        <view class="installation-facts">
+          <view
+            ><text>直流电机</text
+            ><text
+              >{{installation.status && installation.status.active ? '输出已屏蔽' :
+              '进入安装后屏蔽'}}</text
+            ></view
+          >
+          <view
+            ><text>自适应腿高</text
+            ><text
+              >{{installation.status && installation.status.active ? '已关闭' :
+              '进入安装后关闭'}}</text
+            ></view
+          >
+          <view><text>左右腿目标</text><text>44.5 mm / 44.5 mm</text></view>
+        </view>
+        <text class="section-description"
+          >先支撑好车体，再进入安装模式。等待舵机静止后，按最低腿高位置安装舵盘和连杆。</text
+        >
+        <view class="installation-actions">
+          <button
+            class="primary-button"
+            bindtap="enterInstallation"
+            disabled="{{!parameterAvailable || busy || installation.busy || (installation.status && installation.status.active)}}"
+          >
+            进入安装模式
+          </button>
+          <button
+            class="secondary-button"
+            bindtap="queryInstallation"
+            disabled="{{!parameterAvailable || busy || installation.busy}}"
+          >
+            刷新状态
+          </button>
+          <button
+            class="secondary-button"
+            bindtap="finishInstallation"
+            disabled="{{!parameterAvailable || busy || installation.busy}}"
+          >
+            安装完成，退出模式
+          </button>
+        </view>
+        <text wx:if="{{!parameterAvailable}}" class="parameter-note"
+          >{{demo ? '模拟模式不会移动真实舵机，请关闭模拟并连接设备。' :
+          '请先在连接页面连接蓝牙并确认串口通道。'}}</text
+        >
+      </view>
+      <view class="panel installation-panel">
+        <text class="panel-title">安装期间保持位置</text>
+        <text class="section-description"
+          >切换页面或蓝牙断开不会解除车端安装锁定。重新连接后，请刷新状态；设备重启后需重新进入安装模式。</text
+        >
+        <text class="section-description"
+          >“已锁定”表示舵机目标 PWM
+          已到位，请目视确认舵机已静止。退出后车端控制保持关闭，可在遥控调参页手动恢复。</text
+        >
+      </view>
+    </view>
+  </scroll-view>
+
+  <view class="app-footer">
+    <view class="brand"
+      ><view class="brand-mark"><view></view><view></view><view></view></view
+      ><text class="brand-name">CF STUDIO</text><text class="model-name">WL1</text></view
+    >
+    <view class="connection-status"
+      ><view class="status-dot {{ready ? 'status-dot-ready' : ''}}"></view
+      ><text>{{statusLabel}}</text></view
+    >
+    <view
+      wx:if="{{tab === 'control'}}"
+      class="status-line {{error || ble.error ? 'status-line-error' : ''}}"
+      ><text wx:if="{{error || ble.error}}" class="status-message">{{error || ble.error}}</text
+      ><text wx:else class="status-message"
+        >主分支无失联超时保护 · 请先停止再断开 · 停止不会断电</text
+      ><text class="status-code">{{demo ? 'LOCAL SIMULATION' : 'WL1 / UART CONTROL'}}</text></view
+    >
+  </view>
 
   <view wx:if="{{parameterPanelOpen}}" class="parameter-overlay">
     <view class="parameter-dialog">

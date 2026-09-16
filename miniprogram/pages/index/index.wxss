@@ -19,6 +19,14 @@
   padding-right: 100px;
   border-bottom: 1px solid var(--border);
 }
+.app-footer {
+  display: flex;
+  align-items: center;
+  flex: 0 0 24px;
+  min-width: 0;
+  gap: 12px;
+  padding-top: 2px;
+}
 .brand {
   display: flex;
   align-items: center;
@@ -59,6 +67,7 @@
 .connection-status {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 5px;
   min-width: 0;
   white-space: nowrap;
@@ -79,11 +88,14 @@
 .topbar-actions {
   display: flex;
   align-items: center;
-  gap: 5px;
-  margin-left: auto;
+  flex-shrink: 0;
+  gap: 4px;
 }
 .nav-button {
-  padding: 6px 10px;
+  flex: 0 0 120px;
+  width: 120px;
+  min-width: 0;
+  padding: 6px 0;
   border: 1px solid var(--accent);
   border-radius: 5px;
   background: var(--surface);
@@ -762,7 +774,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex: 0 0 18px;
+  flex: 1;
+  min-width: 0;
   gap: 12px;
   padding: 2px 1px 0;
   color: var(--muted);
@@ -1228,7 +1241,8 @@
     padding-left: calc(11px + env(safe-area-inset-left));
     padding-right: calc(11px + env(safe-area-inset-right));
   }
-  .topbar {
+  .topbar,
+  .app-footer {
     gap: 8px;
   }
   .brand {
@@ -1241,9 +1255,6 @@
   .model-name {
     padding-left: 7px;
     font-size: 16px;
-  }
-  .nav-button {
-    padding: 6px 8px;
   }
   .controller-stage {
     grid-template-columns: minmax(0, 1fr) minmax(160px, 0.97fr) minmax(0, 1fr);
@@ -1351,8 +1362,8 @@
   .stop-button {
     min-height: 41px;
   }
-  .status-line {
-    flex-basis: 16px;
+  .app-footer {
+    flex-basis: 22px;
   }
 }
 @media (min-width: 1000px) {
@@ -1383,4 +1394,63 @@
   .bottom-controls {
     gap: 18px;
   }
+}
+
+.installation-content {
+  max-width: 980px;
+  margin: 0 auto;
+}
+.installation-panel {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.installation-message {
+  color: #3979ad;
+  font-size: 15px;
+  line-height: 1.6;
+}
+.installation-facts {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.installation-facts > view {
+  flex: 1;
+  min-width: 140px;
+  background: #f2f8ff;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 14px;
+}
+.installation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.installation-actions button {
+  margin: 0;
+}
+
+.installation-actions .primary-button,
+.installation-actions .secondary-button {
+  padding: 12px 20px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--text-strong);
+  background: var(--surface);
+  font-size: 14px;
+}
+.installation-actions .primary-button {
+  background: #275d90;
+  color: #fff;
+}
+.installation-actions button[disabled] {
+  color: var(--disabled);
+  background: var(--disabled-bg);
+  border-color: var(--border);
 }
