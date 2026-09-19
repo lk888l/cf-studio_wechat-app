@@ -74,7 +74,7 @@ Page({
     error: '',
     logs: [] as LogEntry[],
     helpOpen: false,
-    targetBluetoothName: 'D30SP_126BB2',
+    targetBluetoothName: 'D30LE_*',
     panelModeIndex: 0,
     tuningGroupIndex: 0,
     tuningGroups: createTuningGroups(wl1Main.id),
