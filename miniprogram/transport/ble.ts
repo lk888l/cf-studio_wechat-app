@@ -297,6 +297,7 @@ export class BleTransport {
     const deviceId = this.state.deviceId;
     this.selecting = true;
     let warning = '';
+    let notificationsEnabled = false;
     try {
       if (selected.notifyId) {
         try {
@@ -314,6 +315,7 @@ export class BleTransport {
             API_TIMEOUT_MS,
             session,
           );
+          notificationsEnabled = true;
         } catch (reason) {
           this.checkSession(session);
           warning = `${errorMessage(reason, '订阅返回数据')}；仍可发送，无法确认设备是否执行`;
@@ -322,7 +324,11 @@ export class BleTransport {
         warning = '此端点未启用返回通知；仍可发送，无法确认设备是否执行';
       }
       this.checkSession(session);
-      this.patch({ status: 'ready', endpoint: { ...selected }, error: warning });
+      this.patch({
+        status: 'ready',
+        endpoint: { ...selected, notifyId: notificationsEnabled ? selected.notifyId : undefined },
+        error: warning,
+      });
     } finally {
       if (this.isCurrent(session)) this.selecting = false;
     }

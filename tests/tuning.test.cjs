@@ -8,6 +8,8 @@ const {
 
 test('tuning commands match car handlers, without VOFA radio wrappers or incorrect roll option', () => {
   assert.equal(encodeTuning('wl1-main', 'angle-bias', '12.6'), 'anglebias 12.6');
+  assert.equal(encodeTuning('wl1-main', 'angle-bias', '9.5371'), 'anglebias 9.5371');
+  assert.equal(encodeTuning('wl1-main', 'roll-bias', '-2.5312'), 'rollbias -2.5312');
   assert.equal(encodeTuning('wl1-main', 'motor-deadzone', '75'), 'deadzone 75');
   assert.equal(encodeTuning('wl1-main', 'angle-d', '-10.1'), 'anglepid -d -10.1');
   assert.equal(encodeTuning('wl1-main', 'velocity-i', '0.008'), 'velocitypid -i 0.008');
@@ -87,7 +89,7 @@ test('invalid, nonfinite, injected, out-of-range and overprecise parameter input
     '1,2',
     '20.1',
     '-20.1',
-    '0.01',
+    '0.00001',
     '0.0000000001',
   ]) {
     assert.throws(() => encodeTuning('wl1-main', 'angle-bias', value), value);

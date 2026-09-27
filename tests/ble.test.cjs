@@ -172,6 +172,7 @@ test('BLE notify failure still allows sending and explicitly warns execution is 
   });
   await f.ready();
   assert.equal(f.state().status, 'ready');
+  assert.equal(f.state().endpoint.notifyId, undefined);
   assert.match(f.state().error, /无法确认设备是否执行/);
   await f.transport.send('S:0;');
   assert.equal(f.calls.writes.length, 1);

@@ -181,7 +181,7 @@
                     bindconfirm="sendTuningParameter"
                     confirm-type="send"
                     placeholder="输入数值"
-                    disabled="{{tuningBusy === item.id}}"
+                    disabled="{{tuningBusy === item.id || deviceInfo.busy}}"
                     adjust-position="{{true}}"
                     cursor-spacing="24"
                     always-embed="{{true}}"
@@ -191,7 +191,7 @@
                     class="tuning-send"
                     data-id="{{item.id}}"
                     bindtap="sendTuningParameter"
-                    disabled="{{!ready || busy || tuningBusy || parameters.busy || parameterPreparing}}"
+                    disabled="{{!ready || busy || tuningBusy || parameters.busy || parameterPreparing || deviceInfo.busy}}"
                   >
                     {{tuningBusy === item.id ? '发送中' : '发送'}}
                   </button>
@@ -205,7 +205,7 @@
                   data-id="{{item.id}}"
                   bindchanging="onTuningSliderChange"
                   bindchange="onTuningSliderChange"
-                  disabled="{{tuningBusy === item.id}}"
+                  disabled="{{tuningBusy === item.id || deviceInfo.busy}}"
                   block-size="18"
                   block-color="#458dcc"
                   activeColor="#458dcc"
@@ -225,14 +225,21 @@
               <button
                 class="parameter-entry"
                 bindtap="saveParameters"
-                disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing}}"
+                disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing || deviceInfo.busy}}"
               >
-                {{parameters.busy === 'save' ? '等待保存结果…' : '保存参数'}}
+                {{parameters.busy === 'save' ? '保存中…' : '保存参数'}}
+              </button>
+              <button
+                class="parameter-refresh"
+                bindtap="refreshDeviceInfo"
+                disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing || deviceInfo.busy}}"
+              >
+                {{deviceInfo.busy ? '读取中…' : '重新读取'}}
               </button>
               <button
                 class="parameter-details"
                 bindtap="openParameterPanel"
-                disabled="{{parameters.busy || parameterPreparing}}"
+                disabled="{{parameters.busy || parameterPreparing || deviceInfo.busy}}"
               >
                 参数状态
               </button>
@@ -640,7 +647,13 @@
     <view class="parameter-dialog">
       <view class="parameter-heading">
         <text class="panel-title">参数状态与控制</text>
-        <button class="text-button" bindtap="closeParameterPanel">返回调参</button>
+        <button
+          class="parameter-back-button"
+          bindtap="closeParameterPanel"
+          aria-label="返回主界面"
+        >
+          ← 返回主界面
+        </button>
       </view>
       <scroll-view class="parameter-scroll" scroll-y enhanced>
         <view class="parameter-content">
@@ -659,6 +672,14 @@
             >{{demo ? '模拟模式不发送蓝牙命令。' : '请先连接蓝牙设备并确认串口通道。'}}</text
           >
           <view class="parameter-status">
+            <text>车端序列号：{{deviceInfo.uid || '尚未读取'}}</text>
+            <text
+              >俯仰中点：{{deviceInfo.angleBias ? deviceInfo.angleBias.base + '°（44.5 mm 基准）' :
+              '尚未读取'}}</text
+            >
+            <text
+              >横滚中点：{{deviceInfo.rollBias ? deviceInfo.rollBias.base + '°' : '尚未读取'}}</text
+            >
             <text
               >车端平衡：{{!parameters.status ? '待查询' : (parameters.status.armed ? '已使能' :
               '已关闭')}}</text
@@ -680,21 +701,21 @@
             <button
               class="button button-secondary"
               bindtap="queryParameters"
-              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing}}"
+              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing || deviceInfo.busy}}"
             >
               {{parameters.busy === 'params' ? '查询中…' : '查询参数状态'}}
             </button>
             <button
               class="button button-secondary"
               bindtap="disableFirmwareControl"
-              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing}}"
+              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing || deviceInfo.busy}}"
             >
               {{parameters.busy === 'off' ? '确认关闭中…' : '关闭车端控制'}}
             </button>
             <button
               class="button button-secondary"
               bindtap="enableFirmwareControl"
-              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing}}"
+              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing || deviceInfo.busy}}"
             >
               {{parameters.busy === 'on' ? '恢复中…' : '恢复车端控制'}}
             </button>

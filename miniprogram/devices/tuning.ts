@@ -39,9 +39,10 @@ export function tuningGroups(profileId: string): TuningGroup[] {
     {
       id: 'balance',
       name: '重心标定与电机输出死区',
-      note: '俯仰偏置以最低腿高 44.5 mm 为基准；电机死区同时作用于左右轮，0 表示关闭补偿。调节前请架空车轮。',
+      note: '连接后读取本车当前的俯仰和横滚中点。俯仰偏置以最低腿高 44.5 mm 为基准；横滚偏置用于自适应腿高的左右中点。电机死区同时作用于左右轮，0 表示关闭补偿。调节前请架空车轮。',
       parameters: [
-        parameter('angle-bias', '俯仰偏置 / °', 'anglebias', -20, 20, 0.1, 1, soft ? 7 : 12.6),
+        parameter('angle-bias', '俯仰偏置 / °', 'anglebias', -20, 20, 0.1, 4, soft ? 7 : 12.6),
+        parameter('roll-bias', '自适应腿高横滚中点 / °', 'rollbias', -20, 20, 0.1, 4, 0),
         parameter('motor-deadzone', '电机输出死区 / PWM', 'deadzone', 0, 1000, 1, 0, 0),
       ],
     },

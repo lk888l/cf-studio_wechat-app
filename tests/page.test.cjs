@@ -17,6 +17,12 @@ function fixture(t, overrides = {}) {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 100000 });
   const handlers = new Map();
   const calls = { writes: [], connections: [], closes: [], selectorCallbacks: [], scans: 0 };
+  const calibrationReplies = {
+    'uid\n': 'uid: 0123456789ABCDEF10203040\n',
+    'anglebias\n': 'anglebias base=12.6000 effective=10.1234\n',
+    'rollbias\n': 'rollbias base=-2.5000 raw=2.5000 effective=0.0000\n',
+    ...overrides.calibrationReplies,
+  };
   const success = (options) => options.success({ errMsg: 'ok' });
   const api = {
     openBluetoothAdapter: success,
@@ -50,8 +56,20 @@ function fixture(t, overrides = {}) {
     },
     notifyBLECharacteristicValueChange: success,
     writeBLECharacteristicValue(options) {
-      calls.writes.push({ text: frameText(options.value), at: Date.now(), options });
+      const text = frameText(options.value);
+      calls.writes.push({ text, at: Date.now(), options });
       success(options);
+      const reply = calibrationReplies[text];
+      if (reply)
+        queueMicrotask(() => {
+          for (const handler of handlers.get('BLECharacteristicValueChange'))
+            handler({
+              deviceId: options.deviceId,
+              serviceId: options.serviceId,
+              characteristicId: options.characteristicId === 'FFE2' ? 'FFE1' : 'RX',
+              value: Uint8Array.from(Buffer.from(reply)).buffer,
+            });
+        });
     },
     setClipboardData: success,
     showModal: (options) => options.success({ confirm: false, cancel: true }),
@@ -141,6 +159,9 @@ function fixture(t, overrides = {}) {
       page.selectEndpoint(datasetEvent({ index: 0 }));
       await flush();
       assert.equal(page.data.ready, true);
+      for (let index = 0; index < 3; index++) await f.advance(30);
+      if (page.data.ble.endpoint.notifyId) assert.equal(page.data.deviceInfo.busy, '');
+      calls.writes.length = 0;
     },
     async move(identifier = 7) {
       page.toggleArmed();
@@ -185,7 +206,9 @@ test('ZX-D30 connection is ready for control without manual endpoint selection',
   assert.ok(f.calls.writes.length > 0);
   assert.ok(f.calls.writes.every((write) => write.options.characteristicId === 'FFE2'));
   assert.ok(
-    f.calls.writes.every((write) => write.text.startsWith('R ') && !write.text.endsWith('\n')),
+    f.calls.writes
+      .filter((write) => write.text.startsWith('R '))
+      .every((write) => !write.text.endsWith('\n')),
   );
 });
 
@@ -204,6 +227,47 @@ async function connectedMain(f) {
   await f.connected();
   assert.equal(f.page.data.parameterAvailable, true);
 }
+
+test('connection handshake fills both midpoint editors from this car and can read again', async (t) => {
+  const f = fixture(t, {
+    calibrationReplies: {
+      'uid\n': 'uid: AABBCCDD0011223344556677\n',
+      'anglebias\n': 'anglebias base=9.5371 effective=7.2134\n',
+      'rollbias\n': 'rollbias base=-2.5312 raw=2.5000 effective=-0.0312\n',
+    },
+  });
+  await f.connected();
+  assert.equal(f.page.data.deviceInfo.uid, 'AABBCCDD0011223344556677');
+  assert.equal(f.page.findTuningParameter('angle-bias').draft, '9.5371');
+  assert.equal(f.page.findTuningParameter('roll-bias').draft, '-2.5312');
+  assert.equal(f.page.findTuningParameter('angle-bias').status, '已从本车读取 · 未修改');
+  assert.equal(f.page.data.deviceInfo.angleBias.effective, 7.2134);
+  assert.equal(f.page.data.deviceInfo.rollBias.raw, 2.5);
+  assert.deepEqual(f.calls.writes, []);
+  f.page.onTuningInput(tuningInput('roll-bias', '-2.4312'));
+  f.page.sendTuningParameter(datasetEvent({ id: 'roll-bias' }));
+  await f.advance();
+  assert.equal(f.calls.writes.at(-1).text, 'rollbias -2.4312');
+  assert.equal(f.page.data.deviceInfo.rollBias, null);
+  f.page.refreshDeviceInfo();
+  for (let index = 0; index < 3; index++) await f.advance(30);
+  assert.equal(f.page.findTuningParameter('roll-bias').draft, '-2.5312');
+});
+
+test('without return notifications the editors require a read or manual value', async (t) => {
+  const f = fixture(t, {
+    notifyBLECharacteristicValueChange: (options) => options.fail({ errCode: 10007 }),
+  });
+  await f.connected();
+  assert.equal(f.page.data.deviceInfo.uid, '');
+  assert.equal(f.page.findTuningParameter('angle-bias').draft, '');
+  assert.equal(f.page.findTuningParameter('roll-bias').draft, '');
+  assert.match(f.page.data.deviceInfo.message, /无法读取/);
+  f.page.onTuningInput(tuningInput('angle-bias', '10.5'));
+  f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
+  await f.advance();
+  assert.equal(f.calls.writes.at(-1).text, 'anglebias 10.5');
+});
 test('page save immediately writes save without opening a panel, querying or confirming', async (t) => {
   const f = fixture(t);
   await connectedMain(f);
@@ -495,16 +559,16 @@ test('slider endpoints, negative values and decimal steps map to precise sendabl
   assert.equal(bias().sliderMaximum, 400);
   assert.equal(bias().sliderValue, 326);
   f.page.onTuningSliderChange(tuningInput('angle-bias', 0));
-  assert.equal(bias().draft, '-20.0');
+  assert.equal(bias().draft, '-20.0000');
   f.page.onTuningSliderChange(tuningInput('angle-bias', 400));
-  assert.equal(bias().draft, '20.0');
+  assert.equal(bias().draft, '20.0000');
   f.page.onTuningSliderChange(tuningInput('angle-bias', 146));
-  assert.equal(bias().draft, '-5.4');
+  assert.equal(bias().draft, '-5.4000');
   f.page.onTuningSliderChange(tuningInput('velocity-i', 9999));
   assert.equal(f.page.findTuningParameter('velocity-i').draft, '9.999');
   for (const value of [-1, 401, 3.2, NaN])
     f.page.onTuningSliderChange(tuningInput('angle-bias', value));
-  assert.equal(bias().draft, '-5.4');
+  assert.equal(bias().draft, '-5.4000');
   assert.deepEqual(f.calls.writes, []);
   f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
   await f.advance();
@@ -519,7 +583,7 @@ test('input preserves partial edits without resetting the slider and recovers af
   await f.demo();
   const bias = () => f.page.findTuningParameter('angle-bias');
   const sliderValue = bias().sliderValue;
-  for (const draft of ['', '-', '.', '21', '0.001']) {
+  for (const draft of ['', '-', '.', '21', '0.00001']) {
     f.page.onTuningInput(tuningInput('angle-bias', draft));
     assert.equal(bias().draft, draft);
     assert.equal(bias().sliderValue, sliderValue);
@@ -531,18 +595,17 @@ test('input preserves partial edits without resetting the slider and recovers af
   assert.equal(bias().sliderValue, 196);
   assert.equal(f.page.data.tuningMessage, '');
   f.page.onTuningSliderChange(tuningInput('angle-bias', 201));
-  assert.equal(bias().draft, '0.1');
+  assert.equal(bias().draft, '0.1000');
   assert.deepEqual(f.calls.writes, []);
 });
 
 test('slider cannot modify unsupported parameters or an active send, and other drafts remain editable', async (t) => {
   let pendingWrite;
-  const f = fixture(t, {
-    writeBLECharacteristicValue: (options) => {
-      pendingWrite = options;
-    },
-  });
+  const f = fixture(t);
   await f.connected();
+  f.api.writeBLECharacteristicValue = (options) => {
+    pendingWrite = options;
+  };
   f.page.sendTuningParameter(datasetEvent({ id: 'velocity-i' }));
   await flush();
   assert.equal(f.page.data.tuningBusy, 'velocity-i');
@@ -571,7 +634,7 @@ test('page sends one real tuning command, reports only sent and resets drafts wh
   );
   assert.equal(f.page.findTuningParameter('angle-bias').status, '已发送 · 未确认执行');
   f.emit('BLEConnectionStateChange', { deviceId: 'robot', connected: false });
-  assert.equal(f.page.findTuningParameter('angle-bias').draft, '12.6');
+  assert.equal(f.page.findTuningParameter('angle-bias').draft, '12.6000');
   assert.equal(f.page.findTuningParameter('angle-bias').status, '固件参考值 · 未发送');
 });
 
@@ -590,7 +653,7 @@ test('invalid tuning and unsupported main gains never reach BLE', async (t) => {
 test('main tuning stays fixed across demo and connection changes', async (t) => {
   const f = fixture(t);
   await f.demo();
-  assert.equal(f.page.findTuningParameter('angle-bias').draft, '12.6');
+  assert.equal(f.page.findTuningParameter('angle-bias').draft, '12.6000');
   assert.ok(f.page.findTuningParameter('angle-p').unavailable);
   f.page.onTuningInput(tuningInput('angle-bias', '13.1'));
   f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
@@ -600,7 +663,7 @@ test('main tuning stays fixed across demo and connection changes', async (t) => 
   f.page.toggleDemo();
   await flush();
   await f.connected();
-  assert.equal(f.page.findTuningParameter('angle-bias').draft, '12.6');
+  assert.equal(f.page.findTuningParameter('angle-bias').draft, '12.6000');
   assert.ok(f.page.findTuningParameter('angle-p').unavailable);
   f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
   await f.advance();
@@ -730,7 +793,7 @@ test('page reconnect keeps main motion format and requires rearming', async (t) 
   await f.connected();
   assert.equal(f.page.data.ready, true);
   assert.equal(f.page.data.armed, false);
-  assert.ok(isNeutral(f.calls.writes.at(-1).text));
+  assert.deepEqual(f.calls.writes, []);
   const sent = f.calls.writes.length;
   await f.advance(1000);
   assert.equal(f.calls.writes.length, sent);
@@ -1081,8 +1144,8 @@ test('page exposes raw received serial text without treating command targets as 
   const f = fixture(t);
   await f.connected();
   await f.move();
-  assert.equal(f.page.data.lastReceive, '');
-  assert.equal(f.page.data.receiveCount, 0);
+  const handshakeReceives = f.page.data.receiveCount;
+  assert.equal(handshakeReceives, 3);
   const desired = { ...f.page.data.control };
   const raw = 'pitch=1.2 speed=-3.4 unknown:7\r\n';
   const event = {
@@ -1092,10 +1155,10 @@ test('page exposes raw received serial text without treating command targets as 
     value: Uint8Array.from(Buffer.from(raw)).buffer,
   };
   f.emit('BLECharacteristicValueChange', { ...event, deviceId: 'other-device' });
-  assert.equal(f.page.data.receiveCount, 0);
+  assert.equal(f.page.data.receiveCount, handshakeReceives);
   f.emit('BLECharacteristicValueChange', event);
   assert.equal(f.page.data.lastReceive, raw);
-  assert.equal(f.page.data.receiveCount, 1);
+  assert.equal(f.page.data.receiveCount, handshakeReceives + 1);
   assert.ok(f.page.data.lastReceiveAt);
   assert.deepEqual(f.page.data.control, desired);
   assert.ok(f.page.data.logs.some((log) => log.direction === 'RX' && log.text === raw));

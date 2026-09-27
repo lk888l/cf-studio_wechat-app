@@ -2,6 +2,7 @@ import { RemoteController } from '../../control/controller';
 import { joystickVector, legJoystickVector, wl1Main } from '../../devices/profiles';
 import { parseTuningValue, tuningGroups } from '../../devices/tuning';
 import { InstallationService, InstallationSnapshot } from '../../services/installation';
+import { DeviceInfoService, DeviceInfoSnapshot } from '../../services/device-info';
 import { onBackground } from '../../services/lifecycle';
 import { ParameterService, ParameterSnapshot } from '../../services/parameters';
 import { BleState, BleTransport } from '../../transport/ble';
@@ -91,11 +92,19 @@ Page({
     parameterPreparing: false,
     parameterAvailable: false,
     parameters: { busy: '', status: null, message: '', success: false } as ParameterSnapshot,
+    deviceInfo: {
+      busy: '',
+      uid: '',
+      angleBias: null,
+      rollBias: null,
+      message: '',
+    } as DeviceInfoSnapshot,
   },
   transport: null as BleTransport | null,
   controller: null as RemoteController | null,
   installationService: null as InstallationService | null,
   parameterService: null as ParameterService | null,
+  deviceInfoService: null as DeviceInfoService | null,
   subscriptions: [] as Array<() => void>,
   touchId: null as number | null,
   joystickRect: null as JoystickRect | null,
@@ -137,6 +146,19 @@ Page({
         if (this.destroyed) return;
         this.setData({ parameters });
         if (!parameters.busy && parameters.message) this.addLog('INFO', parameters.message);
+      },
+    );
+    this.deviceInfoService = new DeviceInfoService(
+      async (frame, onStart) => {
+        if (!this.data.parameterAvailable || !this.transport)
+          throw new Error('请先连接蓝牙设备并确认串口通道');
+        await this.transport.send(frame, onStart);
+        this.addLog('TX', frame);
+      },
+      (deviceInfo) => {
+        if (this.destroyed) return;
+        this.applyDeviceInfo(deviceInfo);
+        if (!deviceInfo.busy && deviceInfo.message) this.addLog('INFO', deviceInfo.message);
       },
     );
     this.installationService = new InstallationService(
@@ -189,16 +211,17 @@ Page({
         if (ble.deviceId !== this.data.ble.deviceId) {
           this.setData({ lastReceive: '', lastReceiveAt: '', receiveCount: 0 });
         }
-        if (
+        const sessionChanged =
           ready !== this.data.ready ||
           ble.deviceId !== this.data.ble.deviceId ||
           ble.endpoint?.writeId !== this.data.ble.endpoint?.writeId ||
           ble.endpoint?.serviceId !== this.data.ble.endpoint?.serviceId ||
-          ble.endpoint?.notifyId !== this.data.ble.endpoint?.notifyId
-        ) {
+          ble.endpoint?.notifyId !== this.data.ble.endpoint?.notifyId;
+        if (sessionChanged) {
           this.resetTuning();
           this.resetParameters();
           this.installationService?.reset();
+          this.deviceInfoService?.reset();
         }
         this.setData({
           ble,
@@ -207,6 +230,7 @@ Page({
         });
         this.controller?.setReady(ready);
         this.updateParameterAvailability();
+        if (sessionChanged && this.data.parameterAvailable) void this.startCalibrationHandshake();
         if (ble.error) this.setData({ error: ble.error });
       }),
     );
@@ -222,6 +246,7 @@ Page({
         if (this.visible) {
           this.parameterService?.receive(text);
           this.installationService?.receive(text);
+          this.deviceInfoService?.receive(text);
         }
       }),
     );
@@ -267,6 +292,7 @@ Page({
     if (this.suspension) return this.suspension;
     this.visible = false;
     this.installationService?.reset();
+    this.deviceInfoService?.reset();
     this.resetParameters();
     this.setData({ parameterAvailable: false, parameterPanelOpen: false });
     this.clearJoysticks();
@@ -597,6 +623,59 @@ Page({
       tuningMessage: '',
     });
   },
+  applyDeviceInfo(deviceInfo: DeviceInfoSnapshot) {
+    const previous = this.data.deviceInfo;
+    this.setData({ deviceInfo });
+    const midpoint = (id: string, value: number) => {
+      const parameter = this.findTuningParameter(id);
+      if (!parameter) return;
+      const sliderValue = Math.max(
+        0,
+        Math.min(parameter.sliderMaximum, Math.round((value - parameter.minimum) / parameter.step)),
+      );
+      this.updateTuningParameter(id, {
+        draft: value.toFixed(parameter.digits),
+        sliderValue,
+        status:
+          value < parameter.minimum || value > parameter.maximum
+            ? '已读取车端值 · 超出页面调节范围'
+            : '已从本车读取 · 未修改',
+      });
+    };
+    if (
+      deviceInfo.angleBias &&
+      (!previous.angleBias || previous.angleBias.base !== deviceInfo.angleBias.base)
+    )
+      midpoint('angle-bias', deviceInfo.angleBias.base);
+    if (
+      deviceInfo.rollBias &&
+      (!previous.rollBias || previous.rollBias.base !== deviceInfo.rollBias.base)
+    )
+      midpoint('roll-bias', deviceInfo.rollBias.base);
+  },
+  async startCalibrationHandshake() {
+    if (!this.data.parameterAvailable || !this.deviceInfoService) return;
+    const epoch = this.tuningEpoch;
+    for (const id of ['angle-bias', 'roll-bias'])
+      this.updateTuningParameter(id, { draft: '', status: '正在读取本车当前值…' });
+    if (!this.data.ble.endpoint?.notifyId) {
+      this.deviceInfoService.reset('串口未启用返回通知，无法读取机身参数');
+    } else {
+      await this.deviceInfoService.readAll();
+    }
+    if (this.destroyed || epoch !== this.tuningEpoch) return;
+    if (!this.data.deviceInfo.angleBias)
+      this.updateTuningParameter('angle-bias', {
+        status: '未读到本车值 · 请刷新或手动输入',
+      });
+    if (!this.data.deviceInfo.rollBias)
+      this.updateTuningParameter('roll-bias', {
+        status: '未读到本车值 · 请刷新或手动输入',
+      });
+  },
+  refreshDeviceInfo() {
+    if (this.canOperateParameters()) void this.startCalibrationHandshake();
+  },
   savePanelSettings() {
     try {
       wx.setStorageSync(panelSettingsKey, {
@@ -645,7 +724,13 @@ Page({
   onTuningInput(event: ValueEvent) {
     const id = String(event.currentTarget.dataset.id || '');
     const parameter = this.findTuningParameter(id);
-    if (!parameter || parameter.unavailable || this.data.tuningBusy === id) return;
+    if (
+      !parameter ||
+      parameter.unavailable ||
+      this.data.tuningBusy === id ||
+      this.data.deviceInfo.busy
+    )
+      return;
     const draft = String(event.detail.value);
     let sliderValue = parameter.sliderValue;
     try {
@@ -665,6 +750,7 @@ Page({
       !parameter ||
       parameter.unavailable ||
       this.data.tuningBusy === id ||
+      this.data.deviceInfo.busy ||
       !Number.isInteger(sliderValue) ||
       sliderValue < 0 ||
       sliderValue > parameter.sliderMaximum
@@ -693,6 +779,7 @@ Page({
       this.data.tuningBusy ||
       this.data.parameters.busy ||
       this.data.parameterPreparing ||
+      this.data.deviceInfo.busy ||
       !this.controller
     )
       return;
@@ -705,7 +792,13 @@ Page({
     try {
       await action();
       if (this.destroyed || epoch !== this.tuningEpoch) return;
-      if (!this.data.demo) this.parameterService?.markParametersChanged();
+      if (!this.data.demo) {
+        this.parameterService?.markParametersChanged();
+        if (id === 'angle-bias' || id === 'roll-bias')
+          this.deviceInfoService?.markCalibrationStale(
+            id === 'angle-bias' ? 'anglebias' : 'rollbias',
+          );
+      }
       const status = this.data.demo ? '模拟发送 · 未写入设备' : '已发送 · 未确认执行';
       this.updateTuningParameter(id === 'angle-auto' ? 'angle-p' : id, {
         status: id === 'angle-auto' ? `自动 Kp ${status}` : status,
@@ -750,7 +843,8 @@ Page({
       !this.data.tuningBusy &&
       !this.data.parameters.busy &&
       !this.data.parameterPreparing &&
-      !this.data.installation.busy
+      !this.data.installation.busy &&
+      !this.data.deviceInfo.busy
     );
   },
   queryParameters() {
