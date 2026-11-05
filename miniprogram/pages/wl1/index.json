@@ -1,0 +1,8 @@
+{
+  "usingComponents": {},
+  "navigationBarTitleText": "CF STUDIO · WL1 双摇杆遥控台",
+  "navigationStyle": "custom",
+  "pageOrientation": "landscape",
+  "backgroundColor": "#f2f8ff",
+  "disableScroll": true
+}

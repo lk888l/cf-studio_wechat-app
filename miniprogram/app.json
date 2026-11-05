@@ -1,5 +1,5 @@
 {
-  "pages": ["pages/index/index"],
+  "pages": ["pages/index/index", "pages/wl1/index"],
   "window": {
     "navigationBarTextStyle": "black",
     "navigationBarTitleText": "CF STUDIO",

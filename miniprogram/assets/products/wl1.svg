@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="440" viewBox="0 0 720 440" fill="none">
+  <defs>
+    <linearGradient id="body" x1="260" y1="106" x2="430" y2="227" gradientUnits="userSpaceOnUse"><stop stop-color="#F2FCFF"/><stop offset="1" stop-color="#6DB9F1"/></linearGradient>
+    <linearGradient id="side" x1="420" y1="136" x2="465" y2="230" gradientUnits="userSpaceOnUse"><stop stop-color="#3C8AC9"/><stop offset="1" stop-color="#23527A"/></linearGradient>
+    <linearGradient id="leg" x1="275" y1="190" x2="337" y2="327" gradientUnits="userSpaceOnUse"><stop stop-color="#D4EFFF"/><stop offset="1" stop-color="#5797C7"/></linearGradient>
+    <linearGradient id="tire" x1="200" y1="263" x2="272" y2="373" gradientUnits="userSpaceOnUse"><stop stop-color="#34516D"/><stop offset="1" stop-color="#172C43"/></linearGradient>
+    <linearGradient id="hub" x1="203" y1="286" x2="257" y2="352" gradientUnits="userSpaceOnUse"><stop stop-color="#A6D7F7"/><stop offset="1" stop-color="#468AC0"/></linearGradient>
+    <radialGradient id="shadow"><stop stop-color="#326D9A" stop-opacity=".24"/><stop offset="1" stop-color="#326D9A" stop-opacity="0"/></radialGradient>
+  </defs>
+  <ellipse cx="365" cy="373" rx="222" ry="35" fill="url(#shadow)"/>
+  <g stroke="#9FC9E8" stroke-width="1" opacity=".5">
+    <path d="m107 331 246-142 258 149M140 350l246-142M180 373l246-142M228 395l246-142M156 304l258 149M208 274l258 149M261 244l258 149"/>
+  </g>
+  <!-- Rear wheel and leg -->
+  <path d="m442 183 40 69-31 54" stroke="#234B6D" stroke-width="24" stroke-linejoin="round"/>
+  <path d="m442 183 40 69-31 54" stroke="#8BBEE0" stroke-width="12" stroke-linejoin="round"/>
+  <ellipse cx="469" cy="304" rx="43" ry="58" fill="#192E44"/>
+  <path d="M449 247c-25 0-45 26-45 58s20 58 45 58h19V247z" fill="url(#tire)"/>
+  <ellipse cx="449" cy="305" rx="41" ry="57" fill="#233E58" stroke="#54728C" stroke-width="3"/>
+  <ellipse cx="449" cy="305" rx="27" ry="39" fill="url(#hub)" stroke="#172F48" stroke-width="5"/>
+  <ellipse cx="449" cy="305" rx="10" ry="15" fill="#254C6E"/>
+  <!-- Chassis -->
+  <path d="m265 128 91-39 112 48-87 43z" fill="#DDF3FF" stroke="#3C719B" stroke-width="3" stroke-linejoin="round"/>
+  <path d="m381 180 87-43v72l-87 44z" fill="url(#side)" stroke="#315E85" stroke-width="3" stroke-linejoin="round"/>
+  <path d="m265 128 116 52v73l-116-53z" fill="url(#body)" stroke="#3C719B" stroke-width="3" stroke-linejoin="round"/>
+  <path d="m280 120 79-28 92 40-77 34z" fill="#F2FBFF" opacity=".75"/>
+  <path d="m289 121 65-24 70 30-64 26z" fill="#7BB6DF" stroke="#5D97C1" stroke-width="2"/>
+  <path d="m303 120 51-18 53 23-49 20z" fill="#244B6E"/>
+  <path d="m318 120 34-11 18 8-34 12z" fill="#8CD9F7"/>
+  <path d="m389 192 64-32M389 202l64-32" stroke="#78B6E5" stroke-width="3"/>
+  <path d="m281 148 34 15v9l-34-15z" fill="#1F4E73"/>
+  <path d="m285 152 8 4M299 158l8 4" stroke="#C1F2FF" stroke-width="3" stroke-linecap="round"/>
+  <path d="m337 173 26 12m-26-5 18 8" stroke="#E8F8FF" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="277" cy="184" r="3" fill="#47769A"/>
+  <circle cx="370" cy="227" r="3" fill="#47769A"/>
+  <!-- Articulated front leg -->
+  <path d="m310 207 42 62-94 55-17-22 70-43-31-43z" fill="#274F71" stroke="#214663" stroke-width="4" stroke-linejoin="round"/>
+  <path d="m302 207 35 56-86 51-11-17 69-41-28-41z" fill="url(#leg)" stroke="#396C92" stroke-width="3" stroke-linejoin="round"/>
+  <ellipse cx="294" cy="209" rx="23" ry="26" transform="rotate(-23 294 209)" fill="#284F70" stroke="#7FB0D3" stroke-width="4"/>
+  <ellipse cx="294" cy="209" rx="11" ry="13" transform="rotate(-23 294 209)" fill="#C0E5FA"/>
+  <circle cx="324" cy="264" r="12" fill="#34658B" stroke="#CAE9FA" stroke-width="4"/>
+  <path d="m307 282-43 26" stroke="#D8F0FD" stroke-width="4" stroke-linecap="round"/>
+  <!-- Front wheel -->
+  <path d="M231 262c-31 0-55 28-55 63s24 64 55 64h23V262z" fill="url(#tire)"/>
+  <ellipse cx="254" cy="325" rx="50" ry="64" fill="#172D44" stroke="#526F87" stroke-width="3"/>
+  <ellipse cx="231" cy="325" rx="51" ry="63" fill="url(#tire)" stroke="#52728E" stroke-width="3"/>
+  <ellipse cx="231" cy="325" rx="35" ry="46" fill="url(#hub)" stroke="#142C43" stroke-width="6"/>
+  <ellipse cx="231" cy="325" rx="23" ry="31" fill="#214B6E" stroke="#B4DFF6" stroke-width="2"/>
+  <path d="M231 295v19m0 22v19m-23-30h14m18 0h14" stroke="#9AD0EF" stroke-width="6"/>
+  <ellipse cx="231" cy="325" rx="10" ry="13" fill="#D3EDFA" stroke="#4B86B2" stroke-width="3"/>
+  <path d="m201 271 17 4m-34 9 16 5m-24 11 17 5m-19 13 15 3m-14 16 16 1m-10 18h17m-8 16 18-2m-2 15 16-5" stroke="#5B758A" stroke-width="4" stroke-linecap="round"/>
+  <!-- Small industrial details -->
+  <path d="m428 125 8-29" stroke="#355E7E" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="437" cy="92" r="5" fill="#458DCC"/>
+  <path d="M518 189h32m-16-16v32M177 178h18m-9-9v18" stroke="#7BB0D7" stroke-width="2" opacity=".7"/>
+</svg>

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const pagePath = require.resolve('../.test-build/miniprogram/pages/index/index.js');
+const pagePath = require.resolve('../.test-build/miniprogram/pages/wl1/index.js');
 const { enterBackground } = require('../.test-build/miniprogram/services/lifecycle.js');
 
 async function flush() {
@@ -16,7 +16,14 @@ const isNeutral = (frame) => /^R 0 0 0 \d+\.\d$/.test(frame);
 function fixture(t, overrides = {}) {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 100000 });
   const handlers = new Map();
-  const calls = { writes: [], connections: [], closes: [], selectorCallbacks: [], scans: 0 };
+  const calls = {
+    writes: [],
+    connections: [],
+    closes: [],
+    redirects: [],
+    selectorCallbacks: [],
+    scans: 0,
+  };
   const calibrationReplies = {
     'uid\n': 'uid: 0123456789ABCDEF10203040\n',
     'anglebias\n': 'anglebias base=12.6000 effective=10.1234\n',
@@ -75,6 +82,10 @@ function fixture(t, overrides = {}) {
     showModal: (options) => options.success({ confirm: false, cancel: true }),
     getStorageSync: () => '',
     setStorageSync: () => undefined,
+    redirectTo(options) {
+      calls.redirects.push(options);
+      options.success?.({ errMsg: 'redirectTo:ok' });
+    },
     ...overrides,
   };
   for (const name of [
@@ -275,7 +286,7 @@ test('page save immediately writes save without opening a panel, querying or con
   const before = f.calls.writes.length;
   // Dispatch the real primary button binding, so a modal-only entry cannot regress.
   const template = require('node:fs').readFileSync(
-    require('node:path').join(__dirname, '../miniprogram/pages/index/index.wxml'),
+    require('node:path').join(__dirname, '../miniprogram/pages/wl1/index.wxml'),
     'utf8',
   );
   const button = template.match(/<button\s+class="parameter-entry"[\s\S]*?<\/button>/)[0];
@@ -1230,4 +1241,174 @@ test('installation in simulation sends no physical BLE commands', async (t) => {
   await flush();
   assert.equal(f.calls.writes.length, 0);
   assert.equal(f.page.data.installation.status, null);
+});
+
+test('product switch waits for neutral and disconnect before navigating, including repeated taps', async (t) => {
+  const f = fixture(t);
+  await f.connected();
+  await f.move();
+  const held = [];
+  let closing;
+  f.api.writeBLECharacteristicValue = (options) => held.push(options);
+  f.api.closeBLEConnection = (options) => {
+    f.calls.closes.push(options.deviceId);
+    closing = options;
+  };
+  const switching = f.page.switchProduct();
+  void f.page.switchProduct();
+  await f.advance();
+  assert.equal(f.page.data.armed, false);
+  assert.equal(f.page.touchId, null);
+  assert.equal(f.page.data.switchingProduct, true);
+  assert.equal(held.length, 1);
+  assert.ok(isNeutral(frameText(held[0].value)));
+  assert.deepEqual(f.calls.closes, []);
+  assert.deepEqual(f.calls.redirects, []);
+  held[0].success({});
+  await flush();
+  assert.deepEqual(f.calls.closes, ['robot']);
+  assert.deepEqual(f.calls.redirects, []);
+  closing.success({});
+  await switching;
+  assert.equal(f.calls.redirects.length, 1);
+  assert.equal(f.calls.redirects[0].url, '/pages/index/index?choose=1');
+  assert.equal(f.page.data.ready, false);
+  await f.page.switchProduct();
+  assert.equal(f.calls.redirects.length, 1);
+});
+
+test('failed product navigation restores interaction for retry without restoring motion', async (t) => {
+  let attempts = 0;
+  const f = fixture(t, {
+    redirectTo(options) {
+      attempts += 1;
+      if (attempts === 1) options.fail({ errMsg: 'redirectTo:fail' });
+    },
+  });
+  await f.connected();
+  await f.move();
+  const switching = f.page.switchProduct();
+  await f.advance();
+  await switching;
+  assert.equal(f.page.visible, true);
+  assert.equal(f.page.data.switchingProduct, false);
+  assert.equal(f.page.data.ready, false);
+  assert.equal(f.page.data.armed, false);
+  assert.equal(f.page.data.control.speed, 0);
+  assert.match(f.page.data.error, /返回产品页失败/);
+  const sent = f.calls.writes.length;
+  f.page.toggleArmed();
+  await f.advance(1000);
+  assert.equal(f.calls.writes.length, sent);
+  await f.page.switchProduct();
+  assert.equal(attempts, 2);
+});
+
+for (const event of ['background', 'hide', 'unload']) {
+  test(`product switch does not navigate after ${event} while stopping`, async (t) => {
+    const f = fixture(t);
+    await f.connected();
+    await f.move();
+    let neutral;
+    f.api.writeBLECharacteristicValue = (options) => {
+      neutral = options;
+    };
+    const switching = f.page.switchProduct();
+    await f.advance();
+    if (event === 'background') enterBackground();
+    if (event === 'hide') f.page.onHide();
+    if (event === 'unload') f.page.onUnload();
+    neutral.success({});
+    await switching;
+    assert.deepEqual(f.calls.redirects, []);
+    assert.equal(f.page.visible, false);
+    assert.equal(f.page.data.armed, false);
+    if (event !== 'unload') {
+      assert.equal(f.page.data.switchingProduct, false);
+      f.page.onShow();
+      await f.page.switchProduct();
+      assert.equal(f.calls.redirects.length, 1);
+    }
+  });
+}
+
+test('late product navigation failure cannot revive a backgrounded or destroyed controller', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  await f.move();
+  await f.page.switchProduct();
+  const redirect = f.calls.redirects[0];
+  f.page.onHide();
+  redirect.fail({ errMsg: 'redirectTo:fail' });
+  await flush();
+  assert.equal(f.page.visible, false);
+  assert.equal(f.page.data.ready, false);
+  assert.equal(f.page.data.armed, false);
+  f.page.onUnload();
+  const afterUnload = structuredClone(f.page.data);
+  redirect.fail({ errMsg: 'redirectTo:fail' });
+  assert.deepEqual(f.page.data, afterUnload);
+});
+
+test('product switch still disconnects if stopping rejects unexpectedly', async (t) => {
+  const f = fixture(t);
+  await f.connected();
+  const stop = f.page.controller.stop.bind(f.page.controller);
+  f.page.controller.stop = async () => {
+    throw new Error('unexpected stop error');
+  };
+  await f.page.switchProduct();
+  assert.deepEqual(f.calls.closes, ['robot']);
+  assert.equal(f.calls.redirects.length, 1);
+  assert.equal(f.page.data.ready, false);
+  f.page.controller.stop = stop;
+});
+
+test('product navigation can retry after a lost callback without accepting an older failure', async (t) => {
+  const redirects = [];
+  const f = fixture(t, { redirectTo: (options) => redirects.push(options) });
+  await f.page.switchProduct();
+  assert.equal(redirects.length, 1);
+  assert.equal(f.page.data.switchingProduct, true);
+  f.page.onHide();
+  await flush();
+  f.page.onShow();
+  assert.equal(f.page.visible, true);
+  assert.equal(f.page.data.switchingProduct, false);
+  await f.page.switchProduct();
+  assert.equal(redirects.length, 2);
+  redirects[0].fail({ errMsg: 'redirectTo:fail stale request' });
+  assert.equal(f.page.data.switchingProduct, true);
+  assert.equal(f.page.visible, false);
+  assert.equal(f.page.data.error, '');
+  redirects[1].fail({ errMsg: 'redirectTo:fail current request' });
+  assert.equal(f.page.data.switchingProduct, false);
+  assert.equal(f.page.visible, true);
+  assert.equal(f.page.data.armed, false);
+  assert.equal(f.page.data.ready, false);
+  assert.match(f.page.data.error, /返回产品页失败/);
+});
+
+test('returning from background while stopping navigates only the new product switch', async (t) => {
+  const f = fixture(t);
+  await f.connected();
+  await f.move();
+  let neutral;
+  f.api.writeBLECharacteristicValue = (options) => {
+    neutral = options;
+  };
+  const oldSwitch = f.page.switchProduct();
+  await f.advance();
+  enterBackground();
+  f.page.onShow();
+  assert.equal(f.page.data.switchingProduct, false);
+  const newSwitch = f.page.switchProduct();
+  assert.equal(f.page.data.switchingProduct, true);
+  neutral.success({});
+  await Promise.all([oldSwitch, newSwitch]);
+  assert.equal(f.calls.redirects.length, 1);
+  assert.equal(f.page.data.switchingProduct, true);
+  assert.equal(f.page.data.armed, false);
+  assert.equal(f.page.data.ready, false);
+  assert.deepEqual(f.calls.closes, ['robot']);
 });
