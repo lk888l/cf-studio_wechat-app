@@ -61,7 +61,9 @@ for (const [name, extension, flags] of [
   ['wcc', '.wxml', []],
   ['wcsc', '.wxss', ['-lc']],
 ]) {
-  const inputs = files.filter((file) => file.endsWith(extension));
+  const inputs = files.filter(
+    (file) => file.endsWith(extension) || (name === 'wcc' && file.endsWith('.wxs')),
+  );
   if (!inputs.length) continue;
   const result = spawnSync(path.join(compilerRoot, name + suffix), [...flags, ...inputs], {
     cwd: appRoot,
@@ -78,6 +80,8 @@ for (const [name, extension, flags] of [
     continue;
   }
   if (result.stderr.trim()) console.error(result.stderr.trim());
-  console.log(`${name}: ${inputs.length} ${extension} file(s) compiled successfully.`);
+  console.log(
+    `${name}: ${inputs.length} ${name === 'wcc' ? '.wxml/.wxs' : extension} file(s) compiled successfully.`,
+  );
 }
 process.exitCode = failed ? 1 : 0;

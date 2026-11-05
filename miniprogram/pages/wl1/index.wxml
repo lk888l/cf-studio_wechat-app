@@ -1,3 +1,4 @@
+<wxs module="joystick" src="./joystick.wxs" />
 <view class="gamepad-shell">
   <view class="topbar">
     <button
@@ -65,16 +66,18 @@
             <view
               id="joystick"
               class="joystick"
-              catchtouchstart="onJoystickStart"
-              catchtouchmove="onJoystickMove"
-              catchtouchend="onJoystickEnd"
-              catchtouchcancel="onJoystickEnd"
+              change:config="{{joystick.configure}}"
+              config="{{ {side: 'motion', rect: motionRect, enabled: armed && ready, epoch: motionViewEpoch} }}"
+              catchtouchstart="{{joystick.start}}"
+              catchtouchmove="{{joystick.move}}"
+              catchtouchend="{{joystick.end}}"
+              catchtouchcancel="{{joystick.end}}"
               aria-label="左摇杆，上下行进，左右转向，松手停止"
             >
               <view class="joystick-ring"></view><view class="joystick-axis joystick-axis-x"></view
               ><view class="joystick-axis joystick-axis-y"></view
               ><view class="joystick-center"></view>
-              <view class="joystick-knob" style="transform: translate({{knobX}}px, {{knobY}}px);"
+              <view id="motion-knob" class="joystick-knob"
                 ><view class="knob-grip"><view></view><view></view><view></view></view
               ></view>
             </view>
@@ -282,18 +285,18 @@
             <view
               id="leg-joystick"
               class="joystick"
-              catchtouchstart="onLegJoystickStart"
-              catchtouchmove="onLegJoystickMove"
-              catchtouchend="onLegJoystickEnd"
-              catchtouchcancel="onLegJoystickEnd"
+              change:config="{{joystick.configure}}"
+              config="{{ {side: 'pose', rect: poseRect, enabled: armed && ready, epoch: poseViewEpoch} }}"
+              catchtouchstart="{{joystick.start}}"
+              catchtouchmove="{{joystick.move}}"
+              catchtouchend="{{joystick.end}}"
+              catchtouchcancel="{{joystick.end}}"
               aria-label="右摇杆，上下调腿高，左右调横滚，松手保持高度并回正横滚"
             >
               <view class="joystick-ring"></view><view class="joystick-axis joystick-axis-x"></view
               ><view class="joystick-axis joystick-axis-y"></view
               ><view class="joystick-center"></view>
-              <view
-                class="joystick-knob"
-                style="transform: translate({{legKnobX}}px, {{legKnobY}}px);"
+              <view id="pose-knob" class="joystick-knob"
                 ><view class="knob-grip"><view></view><view></view><view></view></view
               ></view>
             </view>

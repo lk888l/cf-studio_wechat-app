@@ -21,12 +21,16 @@ export interface ControllerClock {
   now(): number;
   setInterval(callback: () => void, ms: number): number;
   clearInterval(timer: number): void;
+  setTimeout(callback: () => void, ms: number): number;
+  clearTimeout(timer: number): void;
 }
 
 const clock: ControllerClock = {
   now: () => Date.now(),
   setInterval: (callback, ms) => setInterval(callback, ms),
   clearInterval: (timer) => clearInterval(timer),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer),
 };
 
 /** One in-flight write and one replaceable latest state, never a FIFO of motion. */
@@ -34,6 +38,8 @@ export class RemoteController {
   private state: ControllerSnapshot;
   private listeners = new Set<(state: ControllerSnapshot) => void>();
   private timer: number | undefined;
+  private motionTimer: number | undefined;
+  private lastMotionStarted = -Infinity;
   private pending = false;
   private drainPromise: Promise<void> | null = null;
   private ready = false;
@@ -82,6 +88,8 @@ export class RemoteController {
     this.generation += 1;
     this.cancelTuning();
     this.pending = false;
+    this.urgentMotion = false;
+    this.lastMotionStarted = -Infinity;
     this.clearTimer();
     this.state = {
       ...this.state,
@@ -132,8 +140,11 @@ export class RemoteController {
 
   move(speed: number, turn: number): void {
     if (!this.state.armed || !this.state.motionHolding) return;
-    this.state.control = this.profile.normalize({ ...this.state.control, speed, turn });
+    const next = this.profile.normalize({ ...this.state.control, speed, turn });
+    if (next.speed === this.state.control.speed && next.turn === this.state.control.turn) return;
+    this.state.control = next;
     this.emit();
+    this.requestSend();
   }
 
   release(): void {
@@ -160,9 +171,11 @@ export class RemoteController {
 
   movePose(height: number, roll: number): void {
     if (!this.state.armed || !this.state.poseHolding) return;
-    this.state.control = this.profile.normalize({ ...this.state.control, height, roll });
+    const next = this.profile.normalize({ ...this.state.control, height, roll });
+    if (next.height === this.state.control.height && next.roll === this.state.control.roll) return;
+    this.state.control = next;
     this.emit();
-    // Both sticks are coalesced into the same scheduled R frame.
+    this.requestSend();
   }
 
   releasePose(): void {
@@ -174,7 +187,9 @@ export class RemoteController {
 
   pose(height: number, roll: number): void {
     if (!this.state.armed) return;
-    this.state.control = this.profile.normalize({ ...this.state.control, height, roll });
+    const next = this.profile.normalize({ ...this.state.control, height, roll });
+    if (next.height === this.state.control.height && next.roll === this.state.control.roll) return;
+    this.state.control = next;
     this.emit();
     this.requestSend();
   }
@@ -230,6 +245,22 @@ export class RemoteController {
 
   private ensureDrain(): void {
     if (this.drainPromise) return;
+    // Touch input wakes the sender immediately when the link has been idle. Rapid
+    // moves share one trailing timer and one latest target; they never form a FIFO.
+    // Releases/stops bypass this input cadence, but still use the serialized writer.
+    if (this.pending && !this.urgentMotion && !this.tuning) {
+      const delay = this.lastMotionStarted + this.profile.inputIntervalMs - this.timing.now();
+      if (delay > 0) {
+        if (this.motionTimer === undefined) {
+          this.motionTimer = this.timing.setTimeout(() => {
+            this.motionTimer = undefined;
+            this.ensureDrain();
+          }, delay);
+        }
+        return;
+      }
+    }
+    this.clearMotionTimer();
     this.drainPromise = this.drain().finally(() => {
       this.drainPromise = null;
       if ((this.pending || this.tuning) && this.ready) this.ensureDrain();
@@ -238,7 +269,7 @@ export class RemoteController {
 
   private async drain(): Promise<void> {
     const generation = this.generation;
-    while ((this.pending || this.tuning) && this.ready && generation === this.generation) {
+    if ((this.pending || this.tuning) && this.ready && generation === this.generation) {
       const tuning = this.pending && this.urgentMotion ? null : this.tuning;
       if (tuning) {
         this.tuning = null;
@@ -246,6 +277,7 @@ export class RemoteController {
       } else {
         this.pending = false;
         this.urgentMotion = false;
+        this.lastMotionStarted = this.timing.now();
       }
       const frame = tuning ? tuning.frame : this.profile.encode(this.state.control);
       try {
@@ -281,6 +313,12 @@ export class RemoteController {
   private clearTimer(): void {
     if (this.timer !== undefined) this.timing.clearInterval(this.timer);
     this.timer = undefined;
+    this.clearMotionTimer();
+  }
+
+  private clearMotionTimer(): void {
+    if (this.motionTimer !== undefined) this.timing.clearTimeout(this.motionTimer);
+    this.motionTimer = undefined;
   }
 
   dispose(): void {
