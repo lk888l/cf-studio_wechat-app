@@ -22,6 +22,8 @@ function fixture(t, overrides = {}) {
     closes: [],
     redirects: [],
     selectorCallbacks: [],
+    renders: [],
+    renderCallbacks: [],
     scans: 0,
   };
   const calibrationReplies = {
@@ -109,12 +111,17 @@ function fixture(t, overrides = {}) {
     ...definition,
     data: structuredClone(definition.data),
     subscriptions: [],
-    setData(update) {
+    setData(update, callback) {
+      calls.renders.push(structuredClone(update));
       for (const [key, value] of Object.entries(structuredClone(update))) {
         const segments = key.replace(/\[(\d+)\]/g, '.$1').split('.');
         let target = this.data;
         for (const segment of segments.slice(0, -1)) target = target[segment];
         target[segments.at(-1)] = value;
+      }
+      if (callback) {
+        if (this.deferRender) calls.renderCallbacks.push(callback);
+        else callback();
       }
     },
     createSelectorQuery() {
@@ -180,7 +187,7 @@ function fixture(t, overrides = {}) {
       assert.equal(page.data.armed, true);
       page.onJoystickStart(touchEvent([touch(identifier)]));
       await f.advance(100);
-      assert.ok(page.data.control.speed > 0);
+      assert.ok(page.controller.snapshot().control.speed > 0);
     },
   };
   t.after(async () => {
@@ -233,6 +240,215 @@ function receiveParameters(f, text) {
     value: Uint8Array.from(Buffer.from(text)).buffer,
   });
 }
+
+// Exercise the actual WXS -> page -> controller path, including delayed view
+// config delivery. The knob is observable without a setData render callback.
+function stickView(f) {
+  const module = { exports: {} };
+  require('node:vm').runInNewContext(
+    require('node:fs').readFileSync(
+      require('node:path').join(__dirname, '../miniprogram/pages/wl1/joystick.wxs'),
+      'utf8',
+    ),
+    { module, Math },
+  );
+  const wxs = module.exports;
+  const styles = {};
+  const states = { motion: {}, pose: {} };
+  const instances = Object.fromEntries(
+    Object.keys(states).map((side) => [side, { getState: () => states[side] }]),
+  );
+  const owner = {
+    selectComponent: (id) => ({ setStyle: (style) => (styles[id] = style) }),
+    callMethod: (name, data) => f.page[name](structuredClone(data)),
+  };
+  const view = {
+    styles,
+    sync() {
+      for (const side of ['motion', 'pose']) {
+        wxs.configure(
+          {
+            side,
+            rect: f.page.data[side === 'motion' ? 'motionRect' : 'poseRect'],
+            enabled: f.page.data.armed && f.page.data.ready,
+            epoch: f.page.data[side === 'motion' ? 'motionViewEpoch' : 'poseViewEpoch'],
+          },
+          null,
+          owner,
+          instances[side],
+        );
+      }
+    },
+    emit(side, phase, changedTouches, touches = changedTouches) {
+      wxs[phase](
+        { instance: instances[side], type: `touch${phase}`, changedTouches, touches },
+        owner,
+      );
+    },
+  };
+  view.sync();
+  return view;
+}
+
+test('WXS dual-stick dragging paints locally while instrument updates stay bounded', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  f.page.onReady();
+  f.page.toggleArmed();
+  const view = stickView(f);
+  view.emit('motion', 'start', [touch(1, 100, 100)]);
+  view.emit('pose', 'start', [legTouch(2, 500, 100)]);
+  f.calls.renders.length = 0;
+  const selectorCount = f.calls.selectorCallbacks.length;
+  for (let index = 0; index < 200; index++) {
+    const y = 40 + (index % 50);
+    view.emit('motion', 'move', [touch(1, 100, y)]);
+    view.emit('pose', 'move', [legTouch(2, 530, y)]);
+    await f.advance(5);
+  }
+  assert.ok(f.calls.renders.length <= 10, `${f.calls.renders.length} instrument renders in 1 s`);
+  assert.ok(f.calls.renders.every((patch) => !('knobX' in patch) && !('legKnobX' in patch)));
+  assert.ok(f.calls.renders.every((patch) => !('logs' in patch)));
+  assert.equal(f.calls.selectorCallbacks.length, selectorCount);
+  assert.match(view.styles['#motion-knob'].transform, /-11px/);
+  assert.notEqual(f.page.controller.snapshot().control.speed, 0);
+  await f.advance(100);
+  assert.deepEqual(f.page.data.control, f.page.controller.snapshot().control);
+  assert.equal(f.calls.writes.length, 0, 'SIM still never writes BLE');
+});
+
+test('slow render callbacks coalesce readings without delaying motion or release', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  f.page.onReady();
+  f.page.toggleArmed();
+  const view = stickView(f);
+  view.emit('motion', 'start', [touch(1, 100, 100)]);
+  await f.advance(100);
+  f.page.deferRender = true;
+  view.emit('motion', 'move', [touch(1, 100, 36)]);
+  await f.advance(100);
+  const renderCount = f.calls.renders.length;
+  view.emit('motion', 'move', [touch(1, 100, 164)]);
+  await f.advance(300);
+  assert.equal(f.calls.renders.length, renderCount);
+  assert.equal(f.page.controller.snapshot().control.speed, -100);
+  assert.equal(f.page.data.control.speed, 100, 'only the instrument is waiting for rendering');
+  assert.equal(view.styles['#motion-knob'].transform, 'translate3d(0px, 64px, 0)');
+  view.emit('motion', 'end', [touch(1, 100, 164)], []);
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
+  assert.equal(view.styles['#motion-knob'].transform, 'translate3d(0px, 0px, 0)');
+  f.page.deferRender = false;
+  for (const callback of f.calls.renderCallbacks.splice(0)) callback();
+  await f.advance(100);
+  assert.equal(f.page.data.control.speed, 0, 'old queued motion cannot redraw after release');
+});
+
+test('rapid WXS re-grabs work before view config updates, but stopped gestures stay invalid', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  f.page.onReady();
+  f.page.toggleArmed();
+  const view = stickView(f);
+  for (let index = 0; index < 3; index++) {
+    view.emit('motion', 'start', [touch(1)]);
+    view.emit('pose', 'start', [legTouch(2)]);
+    assert.equal(f.page.controller.snapshot().motionHolding, true);
+    assert.equal(f.page.controller.snapshot().poseHolding, true);
+    view.emit('motion', 'end', [touch(1)], [legTouch(2)]);
+    view.emit('pose', 'end', [legTouch(2)], []);
+    assert.equal(f.page.controller.snapshot().control.speed, 0);
+    assert.equal(f.page.controller.snapshot().control.roll, 0);
+  }
+  f.page.stopMotion();
+  await flush();
+  f.page.toggleArmed();
+  view.emit('motion', 'start', [touch(1)]); // Old rendered epoch, delivered late.
+  assert.equal(f.page.controller.snapshot().motionHolding, false);
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
+  view.sync();
+  view.emit('motion', 'start', [touch(1)]);
+  assert.equal(f.page.controller.snapshot().control.speed, 100);
+});
+
+test('layout queries retain the newest touch and cached bounds survive re-grabs', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  f.page.toggleArmed();
+  f.page.deferSelector = true;
+  f.page.onJoystickStart(touchEvent([touch(1, 100, 100)]));
+  f.page.onJoystickMove(touchEvent([touch(1, 100, 164)]));
+  f.calls.selectorCallbacks[0]();
+  assert.equal(f.page.controller.snapshot().control.speed, -100);
+  f.page.onJoystickEnd(touchEvent([touch(1)], []));
+  f.page.onJoystickStart(touchEvent([touch(2)]));
+  assert.equal(f.calls.selectorCallbacks.length, 1);
+  assert.equal(f.page.controller.snapshot().control.speed, 100);
+  f.page.onResize();
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
+  assert.equal(f.page.joystickRect, null);
+});
+
+test('logs stay in memory offscreen, refresh on entry and copy the latest buffered record', async (t) => {
+  let clipboard = '';
+  const f = fixture(t, { setClipboardData: (options) => (clipboard = options.data) });
+  f.calls.renders.length = 0;
+  for (let index = 0; index < 100; index++) f.page.addLog('RX', `record ${index}`);
+  await f.advance(500);
+  assert.equal(f.page.logEntries.length, 60);
+  assert.ok(f.calls.renders.every((patch) => !('logs' in patch)));
+  f.page.switchTab(datasetEvent({ tab: 'console' }));
+  assert.equal(f.page.data.logs[0].text, 'record 99');
+  f.page.addLog('RX', 'latest record');
+  f.page.copyLogs();
+  assert.match(clipboard, /latest record/);
+  f.page.clearLogs();
+  await f.advance(100);
+  assert.deepEqual(f.page.data.logs, []);
+  assert.deepEqual(f.page.logEntries, []);
+});
+
+test('queued readings cannot restore motion after page hide or unload', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  f.page.onReady();
+  f.page.toggleArmed();
+  const view = stickView(f);
+  view.emit('motion', 'start', [touch(1)]);
+  assert.ok(f.page.pendingView);
+  f.page.onHide();
+  assert.equal(f.page.data.control.speed, 0);
+  await f.advance(500);
+  assert.equal(f.page.data.control.speed, 0);
+  f.page.onUnload();
+  const count = f.calls.renders.length;
+  await f.advance(500);
+  assert.equal(f.calls.renders.length, count);
+});
+
+test('a render interrupted by backgrounding cannot stall the next foreground session', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  f.page.onReady();
+  f.page.toggleArmed();
+  const view = stickView(f);
+  view.emit('motion', 'start', [touch(1)]);
+  f.page.deferRender = true;
+  await f.advance(100);
+  assert.ok(f.page.viewInFlight > 0);
+  f.page.onHide();
+  await f.advance(500);
+  assert.equal(f.page.viewInFlight, 0);
+  f.page.deferRender = false;
+  f.page.onShow();
+  f.page.toggleArmed();
+  view.sync();
+  view.emit('motion', 'start', [touch(2, 100, 164)]);
+  await f.advance(100);
+  assert.equal(f.page.data.control.speed, -100);
+  for (const callback of f.calls.renderCallbacks.splice(0)) callback();
+  assert.equal(f.page.viewInFlight, 0, 'old callbacks cannot change the new render count');
+});
 const disarmedParameters = 'params: flash_valid=true unsaved=true armed=false enabled=false\n';
 async function connectedMain(f) {
   await f.connected();
@@ -356,7 +572,7 @@ for (const result of ['ok (all motion parameters)', 'unchanged (no flash write)'
     await connectedMain(f);
     await f.move();
     f.page.onLegJoystickStart(touchEvent([legTouch(8)]));
-    const target = { ...f.page.data.control };
+    const target = { ...f.page.controller.snapshot().control };
     const pointer = f.page.touchId;
     const legPointer = f.page.legTouchId;
     f.page.queryParameters();
@@ -374,7 +590,7 @@ for (const result of ['ok (all motion parameters)', 'unchanged (no flash write)'
     assert.equal(f.page.data.armed, true);
     assert.equal(f.page.touchId, pointer);
     assert.equal(f.page.legTouchId, legPointer);
-    assert.deepEqual(f.page.data.control, target);
+    assert.deepEqual(f.page.controller.snapshot().control, target);
     const afterSave = f.calls.writes.length;
     for (let index = 0; index < 5; index++) await f.advance(100);
     assert.ok(
@@ -386,7 +602,7 @@ for (const result of ['ok (all motion parameters)', 'unchanged (no flash write)'
     f.page.onJoystickMove(touchEvent([touch(7, 100, 164)]));
     f.page.onLegJoystickMove(touchEvent([legTouch(8, 436, 100)]));
     await f.advance(100);
-    const updatedTarget = { ...f.page.data.control };
+    const updatedTarget = { ...f.page.controller.snapshot().control };
     assert.ok(updatedTarget.speed < 0);
     assert.ok(updatedTarget.roll < 0);
     receiveParameters(f, `save: ${result}\r`);
@@ -398,7 +614,7 @@ for (const result of ['ok (all motion parameters)', 'unchanged (no flash write)'
     assert.equal(f.page.data.armed, true);
     assert.equal(f.page.touchId, pointer);
     assert.equal(f.page.legTouchId, legPointer);
-    assert.deepEqual(f.page.data.control, updatedTarget);
+    assert.deepEqual(f.page.controller.snapshot().control, updatedTarget);
     assert.deepEqual(
       f.calls.writes
         .slice(before)
@@ -545,21 +761,21 @@ test('tuning slider and input stay synchronized and send only on tap while demo 
   const f = fixture(t);
   await f.demo();
   await f.move();
-  const { speed, turn } = f.page.data.control;
+  const { speed, turn } = f.page.controller.snapshot().control;
   f.page.onTuningInput(tuningInput('velocity-i', '0.008'));
   assert.equal(f.page.findTuningParameter('velocity-i').sliderValue, 8);
   f.page.onTuningSliderChange(tuningInput('velocity-i', 9));
   assert.equal(f.page.findTuningParameter('velocity-i').draft, '0.009');
-  assert.ok(!f.page.data.logs.some((log) => log.text.startsWith('velocitypid')));
+  assert.ok(!f.page.logEntries.some((log) => log.text.startsWith('velocitypid')));
   f.page.sendTuningParameter(datasetEvent({ id: 'velocity-i' }));
   await flush();
   assert.ok(
-    f.page.data.logs.some((log) => log.direction === 'SIM' && log.text === 'velocitypid -i 0.009'),
+    f.page.logEntries.some((log) => log.direction === 'SIM' && log.text === 'velocitypid -i 0.009'),
   );
   assert.equal(f.page.findTuningParameter('velocity-i').status, '模拟发送 · 未写入设备');
   assert.equal(f.page.data.armed, true);
-  assert.equal(f.page.data.control.speed, speed);
-  assert.equal(f.page.data.control.turn, turn);
+  assert.equal(f.page.controller.snapshot().control.speed, speed);
+  assert.equal(f.page.controller.snapshot().control.turn, turn);
   assert.deepEqual(f.calls.writes, []);
 });
 
@@ -669,7 +885,7 @@ test('main tuning stays fixed across demo and connection changes', async (t) => 
   f.page.onTuningInput(tuningInput('angle-bias', '13.1'));
   f.page.sendTuningParameter(datasetEvent({ id: 'angle-bias' }));
   await flush();
-  assert.ok(f.page.data.logs.some((log) => log.text === 'anglebias 13.1'));
+  assert.ok(f.page.logEntries.some((log) => log.text === 'anglebias 13.1'));
   assert.deepEqual(f.calls.writes, []);
   f.page.toggleDemo();
   await flush();
@@ -696,7 +912,7 @@ test('page demo mode exercises real controls without connecting, scanning or wri
   await flush();
   assert.equal(f.page.data.armed, false);
   assert.ok(f.page.data.sentCount > 0);
-  assert.ok(f.page.data.logs.some((log) => log.direction === 'SIM'));
+  assert.ok(f.page.logEntries.some((log) => log.direction === 'SIM'));
   assert.deepEqual(f.calls.writes, []);
   assert.deepEqual(f.calls.connections, []);
   assert.equal(f.calls.scans, 0);
@@ -710,11 +926,9 @@ test('page releases the owning touch and sends neutral while preserving leg heig
   await f.advance();
   f.page.onJoystickEnd(touchEvent([touch(7)], []));
   await f.advance();
-  assert.equal(f.page.data.control.speed, 0);
-  assert.equal(f.page.data.control.turn, 0);
-  assert.equal(f.page.data.control.height, 60);
-  assert.equal(f.page.data.knobX, 0);
-  assert.equal(f.page.data.knobY, 0);
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
+  assert.equal(f.page.controller.snapshot().control.turn, 0);
+  assert.equal(f.page.controller.snapshot().control.height, 60);
   assert.equal(f.page.touchId, null);
   assert.ok(f.calls.writes.some((write) => !isNeutral(write.text)));
   assert.equal(f.calls.writes.at(-1).text, 'R 0 0 0 60.0');
@@ -724,18 +938,18 @@ test('page ignores a second finger and its release while tracking the original t
   const f = fixture(t);
   await f.demo();
   await f.move(7);
-  const previous = { ...f.page.data.control };
+  const previous = { ...f.page.controller.snapshot().control };
   f.page.onJoystickStart(touchEvent([touch(8, 50, 150)], [touch(7), touch(8, 50, 150)]));
   assert.equal(f.page.touchId, 7);
   f.page.onJoystickMove(touchEvent([touch(8, 50, 150)], [touch(8, 50, 150)]));
-  assert.deepEqual(f.page.data.control, previous);
+  assert.deepEqual(f.page.controller.snapshot().control, previous);
   f.page.onJoystickEnd(touchEvent([touch(8, 50, 150)], [touch(7)]));
   assert.equal(f.page.touchId, 7);
-  assert.ok(f.page.data.control.speed > 0);
+  assert.ok(f.page.controller.snapshot().control.speed > 0);
   f.page.onJoystickEnd(touchEvent([touch(7)], []));
   await flush();
   assert.equal(f.page.touchId, null);
-  assert.equal(f.page.data.control.speed, 0);
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
 });
 
 test('page discards delayed joystick layout callbacks after touch release', async (t) => {
@@ -749,8 +963,7 @@ test('page discards delayed joystick layout callbacks after touch release', asyn
   f.calls.selectorCallbacks[0]();
   await f.advance(100);
   assert.equal(f.page.touchId, null);
-  assert.equal(f.page.data.control.speed, 0);
-  assert.equal(f.page.data.knobY, 0);
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
 });
 
 test('page and app background hooks share one suspension, write neutral and disconnect', async (t) => {
@@ -911,7 +1124,7 @@ test('page background settles safely when an in-flight BLE write times out', asy
   assert.equal(f.page.suspension, null);
   assert.equal(f.page.data.ready, false);
   assert.equal(f.page.data.armed, false);
-  assert.equal(f.page.data.control.speed, 0);
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
   assert.ok(f.calls.closes.includes('robot'));
   const sent = f.calls.writes.length;
   f.api.writeBLECharacteristicValue = originalWrite;
@@ -923,45 +1136,39 @@ test('page supports both thumbs and each release preserves the other joystick ta
   const f = fixture(t);
   await f.connected();
   await f.move(7);
-  const speed = f.page.data.control.speed;
+  const speed = f.page.controller.snapshot().control.speed;
   f.page.onLegJoystickStart(touchEvent([legTouch(8)], [touch(7), legTouch(8)]));
   await f.advance(100);
-  const posture = { ...f.page.data.control };
+  const posture = { ...f.page.controller.snapshot().control };
   assert.equal(f.page.touchId, 7);
   assert.equal(f.page.legTouchId, 8);
   assert.equal(posture.speed, speed);
   assert.ok(posture.roll > 0);
   assert.ok(posture.height > 44.5);
-  assert.ok(f.page.data.legKnobX > 0);
 
   // The left thumb lifts while the right thumb remains on its joystick.
   f.page.onJoystickEnd(touchEvent([touch(7)], [legTouch(8)]));
   await f.advance();
-  assert.equal(f.page.data.control.speed, 0);
-  assert.equal(f.page.data.control.turn, 0);
-  assert.equal(f.page.data.control.roll, posture.roll);
-  assert.equal(f.page.data.control.height, posture.height);
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
+  assert.equal(f.page.controller.snapshot().control.turn, 0);
+  assert.equal(f.page.controller.snapshot().control.roll, posture.roll);
+  assert.equal(f.page.controller.snapshot().control.height, posture.height);
   assert.equal(f.page.touchId, null);
   assert.equal(f.page.legTouchId, 8);
-  assert.equal(f.page.data.knobY, 0);
-  assert.ok(f.page.data.legKnobX > 0);
   assert.equal(f.calls.writes.at(-1).text, `R 0 0 ${posture.roll} ${posture.height.toFixed(1)}`);
 
   // Reacquire the left joystick, then deliver the right joystick's touchcancel.
   f.page.onJoystickStart(touchEvent([touch(9)], [touch(9), legTouch(8)]));
   await f.advance(100);
-  const moving = { ...f.page.data.control };
+  const moving = { ...f.page.controller.snapshot().control };
   f.page.onLegJoystickEnd(touchEvent([legTouch(8)], [touch(9)]));
   await f.advance();
-  assert.equal(f.page.data.control.speed, moving.speed);
-  assert.equal(f.page.data.control.turn, moving.turn);
-  assert.equal(f.page.data.control.roll, 0);
-  assert.equal(f.page.data.control.height, moving.height);
+  assert.equal(f.page.controller.snapshot().control.speed, moving.speed);
+  assert.equal(f.page.controller.snapshot().control.turn, moving.turn);
+  assert.equal(f.page.controller.snapshot().control.roll, 0);
+  assert.equal(f.page.controller.snapshot().control.height, moving.height);
   assert.equal(f.page.touchId, 9);
   assert.equal(f.page.legTouchId, null);
-  assert.equal(f.page.data.legKnobX, 0);
-  assert.equal(f.page.data.legKnobY, 0);
-  assert.ok(f.page.data.knobY < 0);
 });
 
 test('page right joystick anchors height at touch start and maps full travel to plus or minus 17 mm', async (t) => {
@@ -971,21 +1178,21 @@ test('page right joystick anchors height at touch start and maps full travel to 
   await flush();
   const center = legTouch(8, 500, 100);
   f.page.onLegJoystickStart(touchEvent([center]));
-  assert.equal(f.page.data.control.height, 44.5);
+  assert.equal(f.page.controller.snapshot().control.height, 44.5);
   f.page.onLegJoystickMove(touchEvent([legTouch(8, 500, 36)]));
-  assert.equal(f.page.data.control.height, 61.5);
+  assert.equal(f.page.controller.snapshot().control.height, 61.5);
   f.page.onLegJoystickEnd(touchEvent([legTouch(8, 500, 36)], []));
-  assert.equal(f.page.data.control.height, 61.5);
+  assert.equal(f.page.controller.snapshot().control.height, 61.5);
   f.page.onLegJoystickStart(touchEvent([center]));
   assert.equal(
-    f.page.data.control.height,
+    f.page.controller.snapshot().control.height,
     61.5,
     'centering a new hold must not reset saved height',
   );
   f.page.onLegJoystickMove(touchEvent([legTouch(8, 500, 164)]));
-  assert.equal(f.page.data.control.height, 44.5);
+  assert.equal(f.page.controller.snapshot().control.height, 44.5);
   f.page.onLegJoystickEnd(touchEvent([legTouch(8, 500, 164)], []));
-  assert.equal(f.page.data.control.height, 44.5);
+  assert.equal(f.page.controller.snapshot().control.height, 44.5);
 });
 
 test('page routes each joystick only to its owning finger and ignores an extra right-side touch', async (t) => {
@@ -993,22 +1200,22 @@ test('page routes each joystick only to its owning finger and ignores an extra r
   await f.demo();
   await f.move(7);
   f.page.onLegJoystickStart(touchEvent([legTouch(8)], [touch(7), legTouch(8)]));
-  const original = { ...f.page.data.control };
+  const original = { ...f.page.controller.snapshot().control };
   f.page.onLegJoystickStart(
     touchEvent([legTouch(9, 436, 100)], [touch(7), legTouch(8), legTouch(9, 436, 100)]),
   );
   assert.equal(f.page.legTouchId, 8);
   f.page.onLegJoystickMove(touchEvent([legTouch(9, 436, 100)], [touch(7), legTouch(9, 436, 100)]));
-  assert.deepEqual(f.page.data.control, original);
+  assert.deepEqual(f.page.controller.snapshot().control, original);
   f.page.onLegJoystickEnd(touchEvent([legTouch(9)], [touch(7), legTouch(8)]));
   f.page.onLegJoystickEnd(touchEvent([touch(7)], [legTouch(8)]));
   f.page.onJoystickEnd(touchEvent([legTouch(8)], [touch(7)]));
   assert.equal(f.page.touchId, 7);
   assert.equal(f.page.legTouchId, 8);
-  assert.deepEqual(f.page.data.control, original);
+  assert.deepEqual(f.page.controller.snapshot().control, original);
   f.page.onLegJoystickMove(touchEvent([legTouch(8, 436, 100)], [touch(7), legTouch(8, 436, 100)]));
-  assert.ok(f.page.data.control.roll < 0);
-  assert.equal(f.page.data.control.speed, original.speed);
+  assert.ok(f.page.controller.snapshot().control.roll < 0);
+  assert.equal(f.page.controller.snapshot().control.speed, original.speed);
 });
 
 for (const side of ['left', 'right']) {
@@ -1027,10 +1234,9 @@ for (const side of ['left', 'right']) {
     f.page[start](touchEvent([newTouch]));
     assert.equal(f.calls.selectorCallbacks.length, 2);
     f.calls.selectorCallbacks[1]();
-    const expected = { ...f.page.data.control };
+    const expected = { ...f.page.controller.snapshot().control };
     f.calls.selectorCallbacks[0]();
-    assert.deepEqual(f.page.data.control, expected);
-    assert.equal(f.page.data[side === 'left' ? 'knobY' : 'legKnobY'], 0);
+    assert.deepEqual(f.page.controller.snapshot().control, expected);
   });
 }
 
@@ -1040,18 +1246,13 @@ test('page keeps both joystick targets and pointers during prolonged stationary 
   await f.move(7);
   for (let tick = 0; tick < 29; tick += 1) await f.advance(100);
   f.page.onLegJoystickStart(touchEvent([legTouch(8)], [touch(7), legTouch(8)]));
-  const targets = { ...f.page.data.control };
-  const knobs = [f.page.data.knobX, f.page.data.knobY, f.page.data.legKnobX, f.page.data.legKnobY];
+  const targets = { ...f.page.controller.snapshot().control };
   for (let tick = 0; tick < 650; tick += 1) await f.advance(100);
   assert.equal(f.page.touchId, 7);
   assert.equal(f.page.legTouchId, 8);
-  assert.equal(f.page.data.motionHolding, true);
-  assert.equal(f.page.data.poseHolding, true);
-  assert.deepEqual(f.page.data.control, targets);
-  assert.deepEqual(
-    [f.page.data.knobX, f.page.data.knobY, f.page.data.legKnobX, f.page.data.legKnobY],
-    knobs,
-  );
+  assert.equal(f.page.controller.snapshot().motionHolding, true);
+  assert.equal(f.page.controller.snapshot().poseHolding, true);
+  assert.deepEqual(f.page.controller.snapshot().control, targets);
   assert.equal(f.page.data.error, '');
   assert.equal(
     f.calls.writes.at(-1).text,
@@ -1067,17 +1268,17 @@ test('page keeps both joystick targets and pointers during prolonged stationary 
   f.page.onJoystickMove(touchEvent([touch(7, 100, 164)]));
   f.page.onLegJoystickMove(touchEvent([legTouch(8, 436, 100)]));
   await f.advance(100);
-  assert.ok(f.page.data.control.speed < 0);
-  assert.ok(f.page.data.control.roll < 0);
+  assert.ok(f.page.controller.snapshot().control.speed < 0);
+  assert.ok(f.page.controller.snapshot().control.roll < 0);
   f.page.onJoystickEnd(touchEvent([touch(7)], [legTouch(8)]));
   await f.advance();
-  assert.equal(f.page.data.control.speed, 0);
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
   assert.equal(f.page.legTouchId, 8);
-  const height = f.page.data.control.height;
+  const height = f.page.controller.snapshot().control.height;
   f.page.onLegJoystickEnd(touchEvent([legTouch(8)], []));
   await f.advance();
-  assert.equal(f.page.data.control.roll, 0);
-  assert.equal(f.page.data.control.height, height);
+  assert.equal(f.page.controller.snapshot().control.roll, 0);
+  assert.equal(f.page.controller.snapshot().control.height, height);
   assert.equal(f.page.touchId, null);
   assert.equal(f.page.legTouchId, null);
   assert.ok(isNeutral(f.calls.writes.at(-1).text));
@@ -1093,7 +1294,7 @@ test('page defaults to full range and sends each speed mode through BLE includin
   assert.equal(f.page.data.speedModeIndex, 1);
   await f.connected();
   await f.move(7);
-  assert.equal(f.page.data.control.speed, 100);
+  assert.equal(f.page.controller.snapshot().control.speed, 100);
   assert.equal(f.calls.writes.at(-1).text, 'R 0 -100 0 44.5');
   for (const [index, limit] of [
     [0, 60],
@@ -1102,20 +1303,20 @@ test('page defaults to full range and sends each speed mode through BLE includin
   ]) {
     f.page.onSpeedModeChange({ detail: { value: String(index) } });
     await f.advance();
-    assert.equal(f.page.data.control.speed, 0);
+    assert.equal(f.page.controller.snapshot().control.speed, 0);
     assert.equal(f.page.touchId, null);
     assert.ok(isNeutral(f.calls.writes.at(-1).text));
     f.page.onJoystickStart(touchEvent([touch(7)]));
     await f.advance(100);
-    assert.equal(f.page.data.control.speed, limit);
+    assert.equal(f.page.controller.snapshot().control.speed, limit);
     assert.equal(f.calls.writes.at(-1).text, 'R 0 ' + -limit + ' 0 44.5');
     f.page.onJoystickMove(touchEvent([touch(7, 100, 164)]));
     await f.advance(100);
-    assert.equal(f.page.data.control.speed, -limit);
+    assert.equal(f.page.controller.snapshot().control.speed, -limit);
     assert.equal(f.calls.writes.at(-1).text, 'R 0 ' + limit + ' 0 44.5');
     f.page.onJoystickMove(touchEvent([touch(7, 164, 100)]));
     await f.advance(100);
-    assert.equal(f.page.data.control.turn, limit);
+    assert.equal(f.page.controller.snapshot().control.turn, limit);
     assert.equal(f.calls.writes.at(-1).text, 'R ' + limit + ' 0 0 44.5');
   }
 });
@@ -1126,7 +1327,7 @@ for (const action of ['stop', 'background', 'tab', 'resize']) {
     await f.demo();
     await f.move(7);
     f.page.onLegJoystickStart(touchEvent([legTouch(8)], [touch(7), legTouch(8)]));
-    const height = f.page.data.control.height;
+    const height = f.page.controller.snapshot().control.height;
     if (action === 'stop') f.page.stopMotion();
     if (action === 'background') f.page.onHide();
     if (action === 'tab') f.page.switchTab(datasetEvent({ tab: 'console' }));
@@ -1134,20 +1335,16 @@ for (const action of ['stop', 'background', 'tab', 'resize']) {
     await flush();
     assert.equal(f.page.touchId, null);
     assert.equal(f.page.legTouchId, null);
-    assert.equal(f.page.data.motionHolding, false);
-    assert.equal(f.page.data.poseHolding, false);
-    assert.equal(f.page.data.knobX, 0);
-    assert.equal(f.page.data.knobY, 0);
-    assert.equal(f.page.data.legKnobX, 0);
-    assert.equal(f.page.data.legKnobY, 0);
-    assert.equal(f.page.data.control.speed, 0);
-    assert.equal(f.page.data.control.turn, 0);
-    assert.equal(f.page.data.control.roll, 0);
-    assert.equal(f.page.data.control.height, height);
+    assert.equal(f.page.controller.snapshot().motionHolding, false);
+    assert.equal(f.page.controller.snapshot().poseHolding, false);
+    assert.equal(f.page.controller.snapshot().control.speed, 0);
+    assert.equal(f.page.controller.snapshot().control.turn, 0);
+    assert.equal(f.page.controller.snapshot().control.roll, 0);
+    assert.equal(f.page.controller.snapshot().control.height, height);
     f.page.onJoystickMove(touchEvent([touch(7)]));
     f.page.onLegJoystickMove(touchEvent([legTouch(8)]));
-    assert.equal(f.page.data.control.speed, 0);
-    assert.equal(f.page.data.control.roll, 0);
+    assert.equal(f.page.controller.snapshot().control.speed, 0);
+    assert.equal(f.page.controller.snapshot().control.roll, 0);
   });
 }
 
@@ -1157,7 +1354,7 @@ test('page exposes raw received serial text without treating command targets as 
   await f.move();
   const handshakeReceives = f.page.data.receiveCount;
   assert.equal(handshakeReceives, 3);
-  const desired = { ...f.page.data.control };
+  const desired = { ...f.page.controller.snapshot().control };
   const raw = 'pitch=1.2 speed=-3.4 unknown:7\r\n';
   const event = {
     deviceId: 'robot',
@@ -1168,11 +1365,12 @@ test('page exposes raw received serial text without treating command targets as 
   f.emit('BLECharacteristicValueChange', { ...event, deviceId: 'other-device' });
   assert.equal(f.page.data.receiveCount, handshakeReceives);
   f.emit('BLECharacteristicValueChange', event);
+  await f.advance(100);
   assert.equal(f.page.data.lastReceive, raw);
   assert.equal(f.page.data.receiveCount, handshakeReceives + 1);
   assert.ok(f.page.data.lastReceiveAt);
-  assert.deepEqual(f.page.data.control, desired);
-  assert.ok(f.page.data.logs.some((log) => log.direction === 'RX' && log.text === raw));
+  assert.deepEqual(f.page.controller.snapshot().control, desired);
+  assert.ok(f.page.logEntries.some((log) => log.direction === 'RX' && log.text === raw));
 
   f.page.toggleDemo();
   await f.advance();
@@ -1182,7 +1380,7 @@ test('page exposes raw received serial text without treating command targets as 
     at: f.page.data.lastReceiveAt,
     count: f.page.data.receiveCount,
   };
-  const existingRx = f.page.data.logs.filter((log) => log.direction === 'RX').length;
+  const existingRx = f.page.logEntries.filter((log) => log.direction === 'RX').length;
   await f.move(9);
   f.page.onLegJoystickStart(touchEvent([legTouch(10)], [touch(9), legTouch(10)]));
   await f.advance(100);
@@ -1190,7 +1388,7 @@ test('page exposes raw received serial text without treating command targets as 
   assert.equal(f.page.data.lastReceive, received.text);
   assert.equal(f.page.data.lastReceiveAt, received.at);
   assert.equal(f.page.data.receiveCount, received.count);
-  assert.equal(f.page.data.logs.filter((log) => log.direction === 'RX').length, existingRx);
+  assert.equal(f.page.logEntries.filter((log) => log.direction === 'RX').length, existingRx);
 });
 
 test('installation page confirms state, blocks local arming and keeps lock across tabs', async (t) => {
@@ -1294,7 +1492,7 @@ test('failed product navigation restores interaction for retry without restoring
   assert.equal(f.page.data.switchingProduct, false);
   assert.equal(f.page.data.ready, false);
   assert.equal(f.page.data.armed, false);
-  assert.equal(f.page.data.control.speed, 0);
+  assert.equal(f.page.controller.snapshot().control.speed, 0);
   assert.match(f.page.data.error, /返回产品页失败/);
   const sent = f.calls.writes.length;
   f.page.toggleArmed();

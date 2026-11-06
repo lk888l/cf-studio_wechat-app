@@ -1,0 +1,130 @@
+// Keep the knob in the WebView: motion commands still go to the logic layer.
+// WXS deliberately uses its ES5 subset, without timers or global gesture state.
+function findTouch(touches, identifier) {
+  if (!touches) return null;
+  for (var index = 0; index < touches.length; index++) {
+    if (touches[index].identifier === identifier) return touches[index];
+  }
+  return null;
+}
+
+function rememberTouch(touch) {
+  return {
+    identifier: touch.identifier,
+    clientX: touch.clientX,
+    clientY: touch.clientY,
+    pageX: touch.pageX,
+    pageY: touch.pageY,
+  };
+}
+
+function position(owner, state, x, y) {
+  if (!state.config) return;
+  var knob = owner.selectComponent(state.config.side === 'motion' ? '#motion-knob' : '#pose-knob');
+  if (knob) {
+    knob.setStyle({
+      transform: 'translate3d(' + Math.round(x) + 'px, ' + Math.round(y) + 'px, 0)',
+    });
+  }
+}
+
+function reset(owner, state) {
+  state.active = false;
+  state.touchId = null;
+  state.latestTouch = null;
+  position(owner, state, 0, 0);
+}
+
+function draw(owner, state) {
+  var rect = state.config.rect;
+  var touch = state.latestTouch;
+  // A start may arrive before the page's initial selector query completes.
+  // Keep the latest finger position, then redraw when configure supplies rect.
+  if (!touch || !rect || !(rect.width > 0) || !(rect.height > 0)) return;
+  var radius = Math.min(rect.width, rect.height) * 0.32;
+  var x = touch.clientX - rect.left - rect.width / 2;
+  var y = touch.clientY - rect.top - rect.height / 2;
+  var distance = Math.sqrt(x * x + y * y);
+  if (distance > radius) {
+    x = (x / distance) * radius;
+    y = (y / distance) * radius;
+  }
+  position(owner, state, x, y);
+}
+
+function forward(owner, state, phase, event, changedTouches) {
+  owner.callMethod('onStickTouch', {
+    side: state.config.side,
+    phase: phase,
+    touches: event.touches || [],
+    changedTouches: changedTouches || event.changedTouches || [],
+    epoch: state.config.epoch,
+  });
+}
+
+function configure(value, oldValue, owner, instance) {
+  var state = instance.getState();
+  var previous = state.config;
+  state.config = value;
+  if (
+    !value ||
+    !value.enabled ||
+    !previous ||
+    previous.epoch !== value.epoch ||
+    previous.side !== value.side
+  ) {
+    reset(owner, state);
+  } else if (state.active) {
+    draw(owner, state);
+  }
+}
+
+function start(event, owner) {
+  var state = event.instance.getState();
+  if (!state.config || !state.config.enabled || state.active) return false;
+  var changed = event.changedTouches || [];
+  if (!changed.length) return false;
+  state.active = true;
+  state.touchId = changed[0].identifier;
+  state.latestTouch = rememberTouch(changed[0]);
+  draw(owner, state);
+  forward(owner, state, 'start', event);
+  return false;
+}
+
+function move(event, owner) {
+  var state = event.instance.getState();
+  if (!state.active || !state.config || !state.config.enabled) return false;
+  var touch =
+    findTouch(event.touches, state.touchId) || findTouch(event.changedTouches, state.touchId);
+  if (!touch) return false;
+  state.latestTouch = rememberTouch(touch);
+  draw(owner, state);
+  // Do not throttle the one-way control updates: the final target must arrive.
+  forward(owner, state, 'move', event);
+  return false;
+}
+
+function end(event, owner) {
+  var state = event.instance.getState();
+  if (!state.active || !state.config || !state.config.enabled) return false;
+  var changed = event.changedTouches || [];
+  var ended = findTouch(changed, state.touchId);
+  if (!ended) {
+    // Additional fingers cannot release or take over the held stick. Some
+    // cancellations have no changedTouches; synthesize its owning finger.
+    if (changed.length) return false;
+    if (event.type !== 'touchcancel' && findTouch(event.touches, state.touchId)) return false;
+    changed = [state.latestTouch];
+  }
+  reset(owner, state);
+  forward(owner, state, 'end', event, changed);
+  return false;
+}
+
+module.exports = {
+  configure: configure,
+  start: start,
+  move: move,
+  end: end,
+};

@@ -21,6 +21,14 @@ class ManualClock {
   clearInterval(id) {
     this.timers.delete(id);
   }
+  setTimeout(callback, ms) {
+    const id = this.nextId++;
+    this.timers.set(id, { callback, due: this.time + ms });
+    return id;
+  }
+  clearTimeout(id) {
+    this.timers.delete(id);
+  }
   advance(ms) {
     const target = this.time + ms;
     for (;;) {
@@ -28,9 +36,10 @@ class ManualClock {
         .filter(([, timer]) => timer.due <= target)
         .sort((a, b) => a[1].due - b[1].due)[0];
       if (!due) break;
-      const [, timer] = due;
+      const [id, timer] = due;
       this.time = timer.due;
-      timer.due += timer.ms;
+      if (timer.ms === undefined) this.timers.delete(id);
+      else timer.due += timer.ms;
       timer.callback();
     }
     this.time = target;
@@ -82,6 +91,115 @@ function delayedController(t) {
   t.after(() => controller.dispose());
   return { controller, timing, calls, maximumActive: () => maximumActive };
 }
+
+test('a changed target wakes the sender before the next heartbeat after an idle gap', async (t) => {
+  const { controller, timing, frames } = immediateController(t);
+  controller.setReady(true);
+  controller.arm();
+  await flush();
+  timing.advance(75);
+  controller.beginHold();
+  controller.move(40, 12);
+  assert.deepEqual(frames, [neutralFrame, 'R 12 -40 0 44.5']);
+  await flush();
+  timing.advance(10);
+  controller.beginPoseHold();
+  controller.movePose(65.5, 8);
+  controller.move(70, -20);
+  timing.advance(39);
+  await flush();
+  assert.equal(frames.length, 2, 'heartbeat and touch share the same input cadence');
+  timing.advance(1);
+  await flush();
+  assert.equal(frames.at(-1), 'R -20 -70 8 65.5');
+});
+
+test('rapid dual-stick input sends only the newest target at no more than 20 Hz', async (t) => {
+  const { controller, timing, frames } = immediateController(t);
+  controller.setReady(true);
+  controller.arm();
+  await flush();
+  controller.beginHold();
+  controller.beginPoseHold();
+  for (let step = 1; step <= 20; step += 1) {
+    controller.move(step * 5, step);
+    controller.movePose(44.5 + step, step / 2);
+    timing.advance(5);
+    await flush();
+  }
+  assert.deepEqual(frames, [neutralFrame, 'R 10 -50 5 54.5', 'R 20 -100 10 64.5']);
+});
+
+test('dead-zone and rounded duplicate input do not consume a fresh send slot', async (t) => {
+  const { controller, timing, frames } = immediateController(t);
+  controller.setReady(true);
+  controller.arm();
+  await flush();
+  controller.beginHold();
+  controller.beginPoseHold();
+  timing.advance(75);
+  controller.move(0, 0);
+  controller.movePose(44.5, 0);
+  assert.equal(frames.length, 1);
+  timing.advance(5);
+  controller.move(40, 12);
+  await flush();
+  assert.equal(frames.at(-1), 'R 12 -40 0 44.5');
+  controller.move(40.2, 12.1);
+  timing.advance(10);
+  await flush();
+  assert.equal(frames.length, 2);
+});
+
+test('release cancels a trailing movement send and bypasses the input throttle', async (t) => {
+  const { controller, timing, frames } = immediateController(t);
+  controller.setReady(true);
+  controller.arm();
+  await flush();
+  controller.beginHold();
+  timing.advance(10);
+  controller.move(80, 30);
+  timing.advance(10);
+  controller.releaseMotion();
+  await flush();
+  assert.deepEqual(frames, [neutralFrame, neutralFrame]);
+  timing.advance(50);
+  await flush();
+  assert.equal(frames.length, 2, 'the old trailing timer must not replay movement');
+});
+
+test('disconnect removes throttled input and its timer before a new session starts', async (t) => {
+  const { controller, timing, frames } = immediateController(t);
+  controller.setReady(true);
+  controller.arm();
+  await flush();
+  controller.beginHold();
+  controller.move(80, 30);
+  timing.advance(10);
+  controller.setReady(false);
+  controller.setReady(true);
+  timing.advance(1000);
+  await flush();
+  assert.deepEqual(frames, [neutralFrame]);
+  assert.equal(timing.timers.size, 0);
+});
+
+test('a slow write completion sends fresh input without waiting for a heartbeat', async (t) => {
+  const { controller, timing, calls, maximumActive } = delayedController(t);
+  controller.setReady(true);
+  controller.arm();
+  controller.beginHold();
+  controller.move(20, 5);
+  timing.advance(75);
+  controller.move(90, -30);
+  calls[0].resolve();
+  await flush();
+  assert.equal(calls[1].frame, 'R -30 -90 0 44.5');
+  assert.equal(maximumActive(), 1);
+  calls[1].resolve();
+  await flush();
+  assert.equal(calls.length, 2);
+});
 
 test('runtime tuning serializes with motion, keeps newest targets and rejects extra tuning requests', async (t) => {
   const { controller, timing, calls, maximumActive } = delayedController(t);

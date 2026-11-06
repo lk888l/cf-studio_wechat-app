@@ -10,6 +10,7 @@ export interface DeviceProfile {
   name: string;
   supported: boolean;
   intervalMs: number;
+  inputIntervalMs: number;
   initial: ControlState;
   normalize(input: ControlState): ControlState;
   encode(input: ControlState): string;
@@ -47,6 +48,9 @@ export const wl1Main: DeviceProfile = {
   name: 'WL1 · main',
   supported: true,
   intervalMs: 100,
+  // At 9600 8N1 the longest 20-byte command takes about 21 ms on UART.
+  // Limit changed targets to 20 Hz while idle/held targets retain a 10 Hz heartbeat.
+  inputIntervalMs: 50,
   initial: { speed: 0, turn: 0, roll: 0, height: 44.5 },
   normalize: normalizeWl1,
   encode: encodeWl1,

@@ -1,4 +1,4 @@
-import { RemoteController } from '../../control/controller';
+import { ControllerSnapshot, RemoteController } from '../../control/controller';
 import { joystickVector, legJoystickVector, wl1Main } from '../../devices/profiles';
 import { parseTuningValue, tuningGroups } from '../../devices/tuning';
 import { InstallationService, InstallationSnapshot } from '../../services/installation';
@@ -20,6 +20,26 @@ interface JoystickRect {
   width: number;
   height: number;
 }
+interface StickEvent {
+  touches: WechatMiniprogram.TouchDetail[];
+  changedTouches: WechatMiniprogram.TouchDetail[];
+}
+interface StickViewEvent extends StickEvent {
+  side: 'motion' | 'pose';
+  phase: 'start' | 'move' | 'end';
+  epoch: number;
+}
+interface LiveViewPatch {
+  control?: ControllerSnapshot['control'];
+  lastFrame?: string;
+  sentCount?: number;
+  lastReceive?: string;
+  lastReceiveAt?: string;
+  receiveCount?: number;
+  logs?: LogEntry[];
+}
+// The sticks paint in WXS. Only the instrument readings cross the bridge at 10 Hz.
+const liveViewIntervalMs = 100;
 type ValueEvent = WechatMiniprogram.CustomEvent<{ value: string | number }>;
 const panelSettingsKey = 'wl1-control-panel-v1';
 function createTuningGroups(profileId: string) {
@@ -65,10 +85,10 @@ Page({
     control: { ...wl1Main.initial },
     speedModes: ['标准 · 60 RPM', '全量程 · 100 RPM', '超级模式 · 150 RPM'],
     speedModeIndex: 1,
-    knobX: 0,
-    knobY: 0,
-    legKnobX: 0,
-    legKnobY: 0,
+    motionRect: null as JoystickRect | null,
+    poseRect: null as JoystickRect | null,
+    motionViewEpoch: 0,
+    poseViewEpoch: 0,
     lastFrame: '',
     sentCount: 0,
     lastReceive: '',
@@ -119,11 +139,23 @@ Page({
   foreground: true,
   destroyed: false,
   logId: 0,
+  logEntries: [] as LogEntry[],
+  receivedPackets: 0,
+  controllerState: null as ControllerSnapshot | null,
+  pendingView: null as LiveViewPatch | null,
+  viewTimer: undefined as number | undefined,
+  viewInFlight: 0,
+  viewGeneration: 0,
+  viewReady: false,
+  layoutGeneration: 0,
+  motionLatestTouch: null as WechatMiniprogram.TouchDetail | null,
+  poseLatestTouch: null as WechatMiniprogram.TouchDetail | null,
   suspension: null as Promise<void> | null,
   tuningEpoch: 0,
   productSwitchEpoch: 0,
 
   onLoad() {
+    this.logEntries = [];
     rememberProduct('wl1');
     try {
       const settings = wx.getStorageSync(panelSettingsKey);
@@ -195,17 +227,31 @@ Page({
     this.subscriptions.push(
       this.controller.subscribe((state) => {
         if (this.destroyed) return;
-        this.setData({ ...state });
-        if (!state.motionHolding) {
+        const previous = this.controllerState;
+        this.controllerState = state;
+        if (previous?.armed && !state.armed) this.clearJoysticks();
+        const flags: { armed?: boolean; error?: string } = {};
+        if (state.armed !== this.data.armed) flags.armed = state.armed;
+        if (!previous || state.error !== previous.error) flags.error = state.error;
+        if (Object.keys(flags).length) this.setData(flags);
+        if (!state.motionHolding && this.touchId !== null) {
           this.touchId = null;
+          this.motionLatestTouch = null;
           this.motionGesture += 1;
-          this.setData({ knobX: 0, knobY: 0 });
+          this.setData({ motionViewEpoch: this.data.motionViewEpoch + 1 });
         }
-        if (!state.poseHolding) {
+        if (!state.poseHolding && this.legTouchId !== null) {
           this.legTouchId = null;
+          this.poseLatestTouch = null;
           this.legGesture += 1;
-          this.setData({ legKnobX: 0, legKnobY: 0 });
+          this.setData({ poseViewEpoch: this.data.poseViewEpoch + 1 });
         }
+        this.queueLiveView(
+          { control: state.control, lastFrame: state.lastFrame, sentCount: state.sentCount },
+          !state.armed ||
+            previous?.motionHolding !== state.motionHolding ||
+            previous?.poseHolding !== state.poseHolding,
+        );
       }),
     );
     this.subscriptions.push(
@@ -214,7 +260,8 @@ Page({
         const ready =
           this.visible && wl1Main.supported && (this.data.demo || ble.status === 'ready');
         if (ble.deviceId !== this.data.ble.deviceId) {
-          this.setData({ lastReceive: '', lastReceiveAt: '', receiveCount: 0 });
+          this.receivedPackets = 0;
+          this.queueLiveView({ lastReceive: '', lastReceiveAt: '', receiveCount: 0 }, true);
         }
         const sessionChanged =
           ready !== this.data.ready ||
@@ -242,10 +289,10 @@ Page({
     this.subscriptions.push(
       this.transport.onReceive((text) => {
         if (this.destroyed || this.data.demo) return;
-        this.setData({
+        this.queueLiveView({
           lastReceive: text.slice(0, 256),
           lastReceiveAt: new Date().toTimeString().slice(0, 8),
-          receiveCount: this.data.receiveCount + 1,
+          receiveCount: ++this.receivedPackets,
         });
         this.addLog('RX', text);
         if (this.visible) {
@@ -269,11 +316,19 @@ Page({
     this.foreground = true;
     if (this.data.switchingProduct) return;
     this.visible = true;
+    if (this.pendingView) this.queueLiveView({});
+    if (this.data.tab === 'console') this.queueLiveView({ logs: this.logEntries }, true);
+    if (this.viewReady) this.measureJoysticks();
     if (this.data.demo && !this.suspension) {
       const ready = wl1Main.supported;
       this.controller?.setReady(ready);
       this.setData({ ready });
     }
+  },
+
+  onReady() {
+    this.viewReady = true;
+    this.measureJoysticks();
   },
 
   onHide() {
@@ -287,6 +342,7 @@ Page({
     this.cancelProductSwitch();
     const shutdown = this.suspend();
     this.destroyed = true;
+    this.cancelLiveView();
     this.subscriptions.forEach((unsubscribe) => unsubscribe());
     this.subscriptions = [];
     void shutdown.finally(() => {
@@ -297,12 +353,13 @@ Page({
 
   onResize() {
     this.releaseJoysticks();
-    this.joystickRect = null;
-    this.legJoystickRect = null;
+    this.invalidateJoystickLayout(true);
   },
 
   async suspend(): Promise<void> {
     this.visible = false;
+    this.cancelLiveView();
+    this.invalidateJoystickLayout();
     if (this.suspension) return this.suspension;
     this.installationService?.reset();
     this.deviceInfoService?.reset();
@@ -382,11 +439,51 @@ Page({
     }
   },
 
+  queueLiveView(patch: LiveViewPatch, immediate = false) {
+    if (this.destroyed) return;
+    this.pendingView = { ...this.pendingView, ...patch };
+    if (immediate) this.flushLiveView(true);
+    else if (this.visible && this.viewTimer === undefined && !this.viewInFlight) {
+      this.viewTimer = setTimeout(() => {
+        this.viewTimer = undefined;
+        this.flushLiveView();
+      }, liveViewIntervalMs);
+    }
+  },
+
+  flushLiveView(immediate = false) {
+    if (this.destroyed || !this.pendingView || (!immediate && this.viewInFlight)) return;
+    if (this.viewTimer !== undefined) clearTimeout(this.viewTimer);
+    this.viewTimer = undefined;
+    const patch = this.pendingView;
+    this.pendingView = null;
+    if (this.data.tab !== 'console') delete patch.logs;
+    const generation = this.viewGeneration;
+    const trackRender = this.visible;
+    if (trackRender) this.viewInFlight += 1;
+    this.setData(patch, () => {
+      if (generation !== this.viewGeneration) return;
+      if (trackRender) this.viewInFlight -= 1;
+      if (this.pendingView && this.visible && !this.destroyed) this.queueLiveView({});
+    });
+  },
+
+  cancelLiveView() {
+    if (this.viewTimer !== undefined) clearTimeout(this.viewTimer);
+    this.viewTimer = undefined;
+    this.pendingView = null;
+    // Background rendering callbacks may arrive late or never arrive. They must
+    // not block a new foreground session or release its in-flight render slot.
+    this.viewGeneration += 1;
+    this.viewInFlight = 0;
+  },
+
   addLog(direction: string, text: string) {
     if (this.destroyed) return;
     const time = new Date().toTimeString().slice(0, 8);
     const entry = { id: ++this.logId, time, direction, text: text.slice(0, 256) };
-    this.setData({ logs: [entry, ...this.data.logs].slice(0, 60) });
+    this.logEntries = [entry, ...this.logEntries].slice(0, 60);
+    if (this.data.tab === 'console' && this.visible) this.queueLiveView({ logs: this.logEntries });
   },
 
   switchTab(event: WechatMiniprogram.BaseEvent) {
@@ -395,7 +492,11 @@ Page({
     const tab = String(event.currentTarget.dataset.tab);
     if (['control', 'connection', 'console', 'installation'].includes(tab)) {
       if (tab !== 'control') void this.controller?.stop();
-      this.setData({ tab });
+      this.invalidateJoystickLayout();
+      this.setData({ tab }, () => {
+        if (tab === 'control') this.measureJoysticks();
+      });
+      if (tab === 'console') this.queueLiveView({ logs: this.logEntries }, true);
       if (tab === 'installation') void this.operateInstallation('query');
     }
   },
@@ -408,6 +509,11 @@ Page({
       if (!this.visible || this.destroyed) return;
       const demo = !this.data.demo;
       const ready = demo && wl1Main.supported;
+      this.receivedPackets = 0;
+      this.queueLiveView(
+        { lastFrame: '', lastReceive: '', lastReceiveAt: '', receiveCount: 0 },
+        true,
+      );
       this.setData({
         demo,
         ready,
@@ -534,9 +640,12 @@ Page({
     this.legTouchId = null;
     this.motionGesture += 1;
     this.legGesture += 1;
-    this.joystickRect = null;
-    this.legJoystickRect = null;
-    this.setData({ knobX: 0, knobY: 0, legKnobX: 0, legKnobY: 0 });
+    this.motionLatestTouch = null;
+    this.poseLatestTouch = null;
+    this.setData({
+      motionViewEpoch: this.data.motionViewEpoch + 1,
+      poseViewEpoch: this.data.poseViewEpoch + 1,
+    });
   },
 
   releaseJoysticks() {
@@ -544,13 +653,78 @@ Page({
     this.controller?.release();
   },
 
-  onJoystickStart(event: WechatMiniprogram.TouchEvent) {
+  invalidateJoystickLayout(remeasure = false) {
+    this.layoutGeneration += 1;
+    this.joystickRect = null;
+    this.legJoystickRect = null;
+    this.setData({ motionRect: null, poseRect: null }, () => {
+      if (remeasure) this.measureJoysticks();
+    });
+  },
+
+  measureJoysticks() {
+    if (this.destroyed || !this.visible || this.data.tab !== 'control') return;
+    const generation = this.layoutGeneration;
+    for (const side of ['motion', 'pose'] as const) {
+      this.createSelectorQuery()
+        .select(side === 'motion' ? '#joystick' : '#leg-joystick')
+        .boundingClientRect((rect) => {
+          if (
+            !rect ||
+            Array.isArray(rect) ||
+            !rect.width ||
+            !rect.height ||
+            this.destroyed ||
+            !this.visible ||
+            this.data.tab !== 'control' ||
+            generation !== this.layoutGeneration
+          )
+            return;
+          this.applyJoystickRect(side, rect);
+        })
+        .exec();
+    }
+  },
+
+  applyJoystickRect(side: 'motion' | 'pose', rect: JoystickRect) {
+    if (!(rect.width > 0) || !(rect.height > 0)) return;
+    // Cache geometry until a layout change; the view layer uses the same coordinates.
+    const bounds = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    if (side === 'motion') {
+      this.joystickRect = bounds;
+      this.setData({ motionRect: bounds });
+      if (this.motionLatestTouch) this.updateJoystick(this.motionLatestTouch);
+    } else {
+      this.legJoystickRect = bounds;
+      this.setData({ poseRect: bounds });
+      if (this.poseLatestTouch) this.updateLegJoystick(this.poseLatestTouch);
+    }
+  },
+
+  onStickTouch(event: StickViewEvent) {
+    if (this.destroyed || !this.visible || this.data.tab !== 'control' || !this.data.ready) return;
+    if (event.side === 'motion' && event.epoch === this.data.motionViewEpoch) {
+      if (event.phase === 'start') this.onJoystickStart(event);
+      else if (event.phase === 'move') this.onJoystickMove(event);
+      else if (event.phase === 'end') this.onJoystickEnd(event);
+    } else if (event.side === 'pose' && event.epoch === this.data.poseViewEpoch) {
+      if (event.phase === 'start') this.onLegJoystickStart(event);
+      else if (event.phase === 'move') this.onLegJoystickMove(event);
+      else if (event.phase === 'end') this.onLegJoystickEnd(event);
+    }
+  },
+
+  onJoystickStart(event: StickEvent) {
     if (!this.data.armed || this.touchId !== null || !event.changedTouches.length) return;
     const touch = event.changedTouches[0];
     if (touch.identifier === this.legTouchId) return;
     this.touchId = touch.identifier;
-    this.joystickRect = null;
+    this.motionLatestTouch = touch;
     this.controller?.beginHold();
+    if (this.joystickRect) {
+      this.updateJoystick(touch);
+      return;
+    }
     const gesture = ++this.motionGesture;
     this.createSelectorQuery()
       .select('#joystick')
@@ -563,14 +737,16 @@ Page({
           gesture !== this.motionGesture
         )
           return;
-        this.joystickRect = rect;
-        this.updateJoystick(touch);
+        this.applyJoystickRect('motion', rect);
       })
       .exec();
   },
-  onJoystickMove(event: WechatMiniprogram.TouchEvent) {
+  onJoystickMove(event: StickEvent) {
     const touch = event.touches.find((item) => item.identifier === this.touchId);
-    if (touch) this.updateJoystick(touch);
+    if (touch) {
+      this.motionLatestTouch = touch;
+      this.updateJoystick(touch);
+    }
   },
   stickOffset(rect: JoystickRect, touch: WechatMiniprogram.TouchDetail) {
     const radius = Math.min(rect.width, rect.height) * 0.32;
@@ -589,25 +765,30 @@ Page({
       y / radius,
       [60, 100, 150][this.data.speedModeIndex],
     );
-    this.setData({ knobX: Math.round(x), knobY: Math.round(y) });
     this.controller?.move(speed, turn);
   },
-  onJoystickEnd(event?: WechatMiniprogram.TouchEvent) {
+  onJoystickEnd(event?: StickEvent) {
     if (event && !event.changedTouches.some((touch) => touch.identifier === this.touchId)) return;
     this.touchId = null;
+    this.motionLatestTouch = null;
     this.motionGesture += 1;
-    this.joystickRect = null;
-    this.setData({ knobX: 0, knobY: 0 });
+    // A touchend already resets WXS locally. Preserve its epoch so a rapid
+    // re-grab before the next render is not mistaken for a stale gesture.
+    if (!event) this.setData({ motionViewEpoch: this.data.motionViewEpoch + 1 });
     this.controller?.releaseMotion();
   },
-  onLegJoystickStart(event: WechatMiniprogram.TouchEvent) {
+  onLegJoystickStart(event: StickEvent) {
     if (!this.data.armed || this.legTouchId !== null || !event.changedTouches.length) return;
     const touch = event.changedTouches[0];
     if (touch.identifier === this.touchId) return;
     this.legTouchId = touch.identifier;
-    this.legJoystickRect = null;
-    this.legHeightAnchor = this.data.control.height;
+    this.poseLatestTouch = touch;
+    this.legHeightAnchor = this.controller?.snapshot().control.height ?? this.data.control.height;
     this.controller?.beginPoseHold();
+    if (this.legJoystickRect) {
+      this.updateLegJoystick(touch);
+      return;
+    }
     const gesture = ++this.legGesture;
     this.createSelectorQuery()
       .select('#leg-joystick')
@@ -620,30 +801,31 @@ Page({
           gesture !== this.legGesture
         )
           return;
-        this.legJoystickRect = rect;
-        this.updateLegJoystick(touch);
+        this.applyJoystickRect('pose', rect);
       })
       .exec();
   },
-  onLegJoystickMove(event: WechatMiniprogram.TouchEvent) {
+  onLegJoystickMove(event: StickEvent) {
     const touch = event.touches.find((item) => item.identifier === this.legTouchId);
-    if (touch) this.updateLegJoystick(touch);
+    if (touch) {
+      this.poseLatestTouch = touch;
+      this.updateLegJoystick(touch);
+    }
   },
   updateLegJoystick(touch: WechatMiniprogram.TouchDetail) {
     const rect = this.legJoystickRect;
     if (!rect || !this.data.armed || !rect.width || !rect.height) return;
     const { x, y, radius } = this.stickOffset(rect, touch);
     const { height, roll } = legJoystickVector(x / radius, y / radius, this.legHeightAnchor);
-    this.setData({ legKnobX: Math.round(x), legKnobY: Math.round(y) });
     this.controller?.movePose(height, roll);
   },
-  onLegJoystickEnd(event?: WechatMiniprogram.TouchEvent) {
+  onLegJoystickEnd(event?: StickEvent) {
     if (event && !event.changedTouches.some((touch) => touch.identifier === this.legTouchId))
       return;
     this.legTouchId = null;
+    this.poseLatestTouch = null;
     this.legGesture += 1;
-    this.legJoystickRect = null;
-    this.setData({ legKnobX: 0, legKnobY: 0 });
+    if (!event) this.setData({ poseViewEpoch: this.data.poseViewEpoch + 1 });
     this.controller?.releasePose();
   },
   onSpeedModeChange(event: ValueEvent) {
@@ -653,10 +835,10 @@ Page({
       this.setData({ speedModeIndex: index });
   },
   onHeightChange(event: ValueEvent) {
-    this.controller?.pose(Number(event.detail.value) / 10, this.data.control.roll);
+    this.controller?.pose(Number(event.detail.value) / 10, this.controller.snapshot().control.roll);
   },
   onRollChange(event: ValueEvent) {
-    this.controller?.pose(this.data.control.height, Number(event.detail.value));
+    this.controller?.pose(this.controller.snapshot().control.height, Number(event.detail.value));
   },
   resetPose() {
     this.onLegJoystickEnd();
@@ -945,11 +1127,12 @@ Page({
     if (this.canOperateParameters()) void this.parameterService?.control(true);
   },
   clearLogs() {
-    this.setData({ logs: [] });
+    this.logEntries = [];
+    this.queueLiveView({ logs: [] }, true);
   },
   copyLogs() {
     wx.setClipboardData({
-      data: this.data.logs.map((log) => `${log.time} [${log.direction}] ${log.text}`).join('\n'),
+      data: this.logEntries.map((log) => `${log.time} [${log.direction}] ${log.text}`).join('\n'),
       fail: () => this.setData({ error: '复制日志失败' }),
     });
   },
