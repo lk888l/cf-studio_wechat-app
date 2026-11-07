@@ -10,7 +10,7 @@ const characteristic = (uuid, properties) => ({
   properties: { read: false, write: false, notify: false, indicate: false, ...properties },
 });
 
-function fixture(t, overrides = {}) {
+function fixture(t, overrides = {}, transportOptions = {}) {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100000 });
   const handlers = new Map();
   const calls = { writes: [], closes: [], stops: 0, adapterCloses: 0, notify: [] };
@@ -66,7 +66,7 @@ function fixture(t, overrides = {}) {
     api[`off${name}`] = (handler) => handlers.get(name).delete(handler);
   }
   global.wx = api;
-  const transport = new BleTransport();
+  const transport = new BleTransport(transportOptions);
   let state;
   transport.subscribe((value) => {
     state = value;
@@ -114,6 +114,126 @@ test('BLE discovery deduplicates devices, updates RSSI and stops after 15 second
   assert.equal(f.calls.stops, 1);
   f.emit('BluetoothDeviceFound', { devices: [{ deviceId: 'late', name: 'late', RSSI: -10 }] });
   assert.equal(f.state().devices.length, 2);
+});
+
+test('BLE discovery preserves row order across signal changes and appends new devices', async (t) => {
+  const f = fixture(t);
+  await f.transport.scan();
+  f.emit('BluetoothDeviceFound', {
+    devices: [
+      { deviceId: 'a', name: 'First', RSSI: -90 },
+      { deviceId: 'b', name: 'Second', RSSI: -20 },
+    ],
+  });
+  assert.deepEqual(
+    f.state().devices.map((device) => device.deviceId),
+    ['a', 'b'],
+  );
+  for (let index = 0; index < 20; index++) {
+    f.emit('BluetoothDeviceFound', {
+      devices: [
+        { deviceId: 'c', name: 'New strongest', RSSI: -1 },
+        { deviceId: 'b', name: 'Second', RSSI: index % 2 ? -95 : -10 },
+        { deviceId: 'a', name: 'First renamed', RSSI: index % 2 ? -10 : -95 },
+      ],
+    });
+    assert.deepEqual(
+      f.state().devices.map((device) => device.deviceId),
+      ['a', 'b', 'c'],
+    );
+  }
+  assert.equal(f.state().devices[0].name, 'First renamed');
+  assert.equal(f.state().devices[0].rssi, -10);
+});
+
+test('BLE discovery pins the configured name prefix with stable order in both groups', async (t) => {
+  const f = fixture(
+    t,
+    {
+      getBluetoothDevices(options) {
+        options.success({
+          devices: [
+            { deviceId: 'other-a', name: 'Sensor', RSSI: -5 },
+            { deviceId: 'target-a', name: 'D30LE_A', RSSI: -95 },
+          ],
+        });
+      },
+    },
+    { preferredNamePrefix: 'D30LE_' },
+  );
+  await f.transport.scan();
+  assert.deepEqual(
+    f.state().devices.map((device) => device.deviceId),
+    ['target-a', 'other-a'],
+  );
+  f.emit('BluetoothDeviceFound', {
+    devices: [
+      { deviceId: 'other-b', name: 'Sensor_D30LE_B', RSSI: -1 },
+      { deviceId: 'target-b', localName: 'D30LE_B', name: 'Cached name', RSSI: -20 },
+      { deviceId: 'target-a', name: 'D30LE_A', RSSI: -100 },
+    ],
+  });
+  assert.deepEqual(
+    f.state().devices.map((device) => [device.deviceId, device.preferred]),
+    [
+      ['target-a', true],
+      ['target-b', true],
+      ['other-a', false],
+      ['other-b', false],
+    ],
+  );
+  f.emit('BluetoothDeviceFound', {
+    devices: [
+      { deviceId: 'target-b', RSSI: -5 },
+      { deviceId: 'other-b', RSSI: -90 },
+    ],
+  });
+  assert.deepEqual(
+    f.state().devices.map((device) => device.deviceId),
+    ['target-a', 'target-b', 'other-a', 'other-b'],
+  );
+  assert.equal(f.state().devices[1].name, 'D30LE_B');
+  assert.equal(f.state().devices[1].rssi, -5);
+});
+
+test('BLE discovery promotes a device when its name arrives and resets order on a new scan', async (t) => {
+  const f = fixture(t, {}, { preferredNamePrefix: 'D30LE_' });
+  await f.transport.scan();
+  f.emit('BluetoothDeviceFound', {
+    devices: [
+      { deviceId: 'other', name: 'Sensor', RSSI: -5 },
+      { deviceId: 'unnamed', RSSI: -20 },
+      { deviceId: 'target', name: 'D30LE_A', RSSI: -80 },
+    ],
+  });
+  assert.deepEqual(
+    f.state().devices.map((device) => device.deviceId),
+    ['target', 'other', 'unnamed'],
+  );
+  f.emit('BluetoothDeviceFound', {
+    devices: [
+      { deviceId: 'unnamed', localName: 'D30LE_B', RSSI: Number.NaN },
+      { deviceId: '', name: 'D30LE_INVALID', RSSI: -1 },
+    ],
+  });
+  assert.deepEqual(
+    f.state().devices.map((device) => device.deviceId),
+    ['target', 'unnamed', 'other'],
+  );
+  assert.equal(f.state().devices[1].preferred, true);
+  assert.equal(f.state().devices[1].rssi, -20);
+  await f.transport.scan();
+  assert.deepEqual(f.state().devices, []);
+  f.emit('BluetoothDeviceFound', {
+    devices: [
+      { deviceId: 'unnamed', name: 'D30LE_B', RSSI: -90 },
+      { deviceId: 'target', name: 'D30LE_A', RSSI: -10 },
+    ],
+  });
+  assert.deepEqual(
+    f.state().devices.map((device) => device.deviceId),
+    ['unnamed', 'target'],
+  );
 });
 
 test('BLE enumerates every service and waits for explicit endpoint confirmation', async (t) => {

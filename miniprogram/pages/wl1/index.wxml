@@ -410,7 +410,8 @@
             ></view
           >
           <view wx:for="{{ble.devices}}" wx:key="deviceId" class="device-row"
-            ><view class="device-symbol">BLE</view
+            ><view class="device-symbol {{item.preferred ? 'device-symbol-target' : ''}}"
+              >{{item.preferred ? '目标' : 'BLE'}}</view
             ><view class="discovered-device"
               ><text class="device-name">{{item.name || '未命名 BLE 设备'}}</text
               ><text class="device-id" selectable>{{item.deviceId}}</text
@@ -430,7 +431,9 @@
             <view class="section-heading"><text class="panel-title">需要连接的蓝牙</text></view>
             <view class="target-device-name"><text selectable>{{targetBluetoothName}}</text></view>
             <text class="target-device-hint">选择并点击 {{targetBluetoothName}}</text>
-            <text class="section-description">在左侧设备列表中找到该名称，点击“连接”。</text>
+            <text class="section-description"
+              >匹配此前缀的设备会置顶并标记“目标”，同组设备按发现顺序排列。核对名称后点击“连接”。</text
+            >
           </view>
           <view wx:if="{{ble.status === 'ready'}}" class="panel endpoint-panel"
             ><view class="section-heading"

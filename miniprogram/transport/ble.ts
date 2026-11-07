@@ -9,12 +9,16 @@ export interface BleEndpoint {
 
 export interface BleState {
   status: 'idle' | 'scanning' | 'connecting' | 'selecting' | 'ready' | 'error';
-  devices: Array<{ deviceId: string; name: string; rssi: number }>;
+  devices: Array<{ deviceId: string; name: string; rssi: number; preferred: boolean }>;
   deviceId: string;
   deviceName: string;
   endpoints: BleEndpoint[];
   endpoint: BleEndpoint | null;
   error: string;
+}
+
+export interface BleTransportOptions {
+  preferredNamePrefix?: string;
 }
 
 type Callbacks<T> = { success: (value: T) => void; fail: (reason: unknown) => void };
@@ -101,7 +105,7 @@ export class BleTransport {
   private selecting = false;
   private connectionPending = false;
 
-  constructor() {
+  constructor(private readonly options: BleTransportOptions = {}) {
     wx.onBluetoothDeviceFound(this.handleDevices);
     wx.onBluetoothAdapterStateChange(this.handleAdapter);
     wx.onBLEConnectionStateChange(this.handleConnection);
@@ -442,15 +446,24 @@ export class BleTransport {
     for (const device of event.devices) {
       if (!device.deviceId) continue;
       const previous = devices.get(device.deviceId);
+      const name =
+        device.localName || device.name || (previous && previous.name) || '未命名 BLE 设备';
       devices.set(device.deviceId, {
         deviceId: device.deviceId,
-        name: device.localName || device.name || (previous && previous.name) || '未命名 BLE 设备',
+        name,
         rssi: Number.isFinite(device.RSSI) ? device.RSSI : previous ? previous.rssi : -100,
+        preferred: Boolean(
+          this.options.preferredNamePrefix && name.startsWith(this.options.preferredNamePrefix),
+        ),
       });
     }
-    this.patch({
-      devices: [...devices.values()].sort((first, second) => second.rssi - first.rssi),
-    });
+    // Keep existing rows in order within each group; changing RSSI must not move connect buttons.
+    const preferred: BleState['devices'] = [];
+    const other: BleState['devices'] = [];
+    for (const device of devices.values()) {
+      (device.preferred ? preferred : other).push(device);
+    }
+    this.patch({ devices: [...preferred, ...other] });
   };
 
   private readonly handleAdapter = (

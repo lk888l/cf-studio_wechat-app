@@ -42,6 +42,7 @@ interface LiveViewPatch {
 const liveViewIntervalMs = 100;
 type ValueEvent = WechatMiniprogram.CustomEvent<{ value: string | number }>;
 const panelSettingsKey = 'wl1-control-panel-v1';
+const targetBluetoothNamePrefix = 'D30LE_';
 function createTuningGroups(profileId: string) {
   return tuningGroups(profileId).map((group) => ({
     ...group,
@@ -97,7 +98,7 @@ Page({
     error: '',
     logs: [] as LogEntry[],
     helpOpen: false,
-    targetBluetoothName: 'D30LE_*',
+    targetBluetoothName: `${targetBluetoothNamePrefix}*`,
     panelModeIndex: 0,
     tuningGroupIndex: 0,
     tuningGroups: createTuningGroups(wl1Main.id),
@@ -171,7 +172,7 @@ Page({
     } catch {
       // Storage is optional; the original instrument panel remains the default.
     }
-    this.transport = new BleTransport();
+    this.transport = new BleTransport({ preferredNamePrefix: targetBluetoothNamePrefix });
     this.parameterService = new ParameterService(
       async (frame, onStart) => {
         if (!this.data.parameterAvailable || !this.transport)

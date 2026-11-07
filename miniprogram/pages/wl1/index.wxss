@@ -1075,6 +1075,11 @@
   font-family: monospace;
   font-size: 8px;
 }
+.device-symbol-target {
+  background: var(--accent-highlight);
+  color: var(--panel-value);
+  font-weight: 600;
+}
 .discovered-device {
   flex: 1;
   min-width: 0;

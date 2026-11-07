@@ -199,6 +199,46 @@ function fixture(t, overrides = {}) {
   return f;
 }
 
+test('WL1 scan pins the displayed name prefix and connects the same row after more broadcasts', async (t) => {
+  const f = fixture(t);
+  assert.equal(f.page.data.targetBluetoothName, 'D30LE_*');
+  f.page.startScan();
+  await flush();
+  f.emit('BluetoothDeviceFound', {
+    devices: [
+      { deviceId: 'sensor', name: 'Nearby sensor', RSSI: -5 },
+      { deviceId: 'car-a', localName: 'D30LE_A', RSSI: -90 },
+    ],
+  });
+  assert.deepEqual(
+    f.page.data.ble.devices.map((device) => device.deviceId),
+    ['car-a', 'sensor'],
+  );
+  assert.equal(f.page.data.ble.devices[0].preferred, true);
+  const selectedId = f.page.data.ble.devices[0].deviceId;
+  f.emit('BluetoothDeviceFound', {
+    devices: [
+      { deviceId: 'car-b', name: 'D30LE_B', RSSI: -1 },
+      { deviceId: 'car-a', RSSI: -100 },
+      { deviceId: 'sensor', RSSI: -2 },
+    ],
+  });
+  assert.deepEqual(
+    f.page.data.ble.devices.map((device) => device.deviceId),
+    ['car-a', 'car-b', 'sensor'],
+  );
+  assert.equal(f.page.data.ble.devices[0].deviceId, selectedId);
+  f.page.connectDevice(datasetEvent({ id: selectedId }));
+  await flush();
+  assert.deepEqual(f.calls.connections, [selectedId]);
+  assert.equal(f.page.data.ble.deviceName, 'D30LE_A');
+  assert.equal(f.page.data.ble.status, 'selecting');
+  f.emit('BluetoothDeviceFound', {
+    devices: [{ deviceId: 'late-car', name: 'D30LE_LATE', RSSI: -1 }],
+  });
+  assert.equal(f.page.data.ble.devices.length, 3);
+});
+
 test('ZX-D30 connection is ready for control without manual endpoint selection', async (t) => {
   const f = fixture(t, {
     getBLEDeviceServices(options) {
