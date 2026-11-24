@@ -1,5 +1,6 @@
 import { ControlState, DeviceProfile, neutral } from '../devices/profiles';
 import { encodeAutoAngleKp, encodeTuning } from '../devices/tuning';
+import { SkippedWriteError, WriteOptions } from '../transport/write';
 
 interface TuningWrite {
   frame: string;
@@ -46,12 +47,13 @@ export class RemoteController {
   private generation = 0;
   private stopping = false;
   private urgentMotion = false;
+  private armingFrame = '';
   private tuning: TuningWrite | null = null;
   private tuningActive = false;
 
   constructor(
     private profile: DeviceProfile,
-    private readonly write: (frame: string) => Promise<void>,
+    private readonly write: (frame: string, options: WriteOptions) => Promise<void>,
     private readonly onSent: (frame: string) => void = () => undefined,
     private readonly timing: ControllerClock = clock,
   ) {
@@ -89,6 +91,7 @@ export class RemoteController {
     this.cancelTuning();
     this.pending = false;
     this.urgentMotion = false;
+    this.armingFrame = '';
     this.lastMotionStarted = -Infinity;
     this.clearTimer();
     this.state = {
@@ -96,7 +99,9 @@ export class RemoteController {
       armed: false,
       motionHolding: false,
       poseHolding: false,
-      control: neutral(this.state.control),
+      control: { ...this.profile.initial },
+      lastFrame: '',
+      sentCount: 0,
       error: '',
     };
     this.emit();
@@ -107,7 +112,7 @@ export class RemoteController {
       throw new Error('请等待停止指令发送完成后切换固件');
     this.setReady(false);
     this.profile = profile;
-    this.state.control = profile.normalize(neutral(this.state.control));
+    this.state.control = { ...profile.initial };
     this.state.lastFrame = '';
     this.emit();
   }
@@ -124,8 +129,9 @@ export class RemoteController {
       control: neutral(this.state.control),
       error: '',
     };
+    this.armingFrame = this.profile.encode(this.state.control);
     this.emit();
-    this.requestSend();
+    this.requestSend(true);
     this.timer = this.timing.setInterval(() => {
       this.requestSend();
     }, this.profile.intervalMs);
@@ -195,7 +201,9 @@ export class RemoteController {
   }
 
   /** Best effort neutral write, not a hardware emergency stop or execution ACK. */
-  async stop(): Promise<void> {
+  async stop(when: 'always' | 'if-armed' = 'always'): Promise<void> {
+    const sendNeutral = this.ready && (when === 'always' || this.state.armed);
+    this.armingFrame = '';
     this.stopping = true;
     this.cancelTuning();
     this.clearTimer();
@@ -205,7 +213,7 @@ export class RemoteController {
     this.state.control = neutral(this.state.control);
     this.emit();
     try {
-      if (this.ready) this.requestSend(true);
+      if (sendNeutral) this.requestSend(true);
       // A stale session's finally may start a new drain. Await that neutral too.
       while (this.drainPromise) await this.drainPromise;
     } finally {
@@ -268,45 +276,68 @@ export class RemoteController {
   }
 
   private async drain(): Promise<void> {
+    if ((!this.pending && !this.tuning) || !this.ready) return;
     const generation = this.generation;
-    if ((this.pending || this.tuning) && this.ready && generation === this.generation) {
-      const tuning = this.pending && this.urgentMotion ? null : this.tuning;
-      if (tuning) {
-        this.tuning = null;
-        this.tuningActive = true;
-      } else {
-        this.pending = false;
-        this.urgentMotion = false;
-        this.lastMotionStarted = this.timing.now();
+    const tuning = this.pending && this.urgentMotion ? null : this.tuning;
+    const urgent = this.urgentMotion;
+    const armingFrame = this.armingFrame;
+    if (tuning) {
+      this.tuning = null;
+      this.tuningActive = true;
+    } else {
+      this.armingFrame = '';
+      this.pending = false;
+      this.urgentMotion = false;
+      this.lastMotionStarted = this.timing.now();
+    }
+    let frame = tuning?.frame || armingFrame || this.profile.encode(this.state.control);
+    try {
+      const options: WriteOptions = tuning
+        ? {
+            onStart: () => {
+              if (this.stopping || generation !== this.generation)
+                throw new SkippedWriteError('调参已取消：运动停止或连接已切换');
+            },
+          }
+        : {
+            isUrgent: () => urgent || this.urgentMotion,
+            currentFrame: () => {
+              if (generation !== this.generation)
+                throw new SkippedWriteError('连接已切换，运动指令已取消');
+              this.lastMotionStarted = this.timing.now();
+              const latest = this.profile.encode(this.state.control);
+              // Only the arming neutral precedes newer input. All later slots sample live targets.
+              frame = armingFrame && this.state.armed ? armingFrame : latest;
+              this.pending = frame !== latest;
+              this.urgentMotion = this.pending && this.urgentMotion;
+              return frame;
+            },
+          };
+      await this.write(frame, options);
+      if (generation !== this.generation) {
+        tuning?.reject(new Error('连接已切换，无法确认参数发送结果'));
+        return;
       }
-      const frame = tuning ? tuning.frame : this.profile.encode(this.state.control);
-      try {
-        await this.write(frame);
-        if (generation !== this.generation) {
-          tuning?.reject(new Error('连接已切换，无法确认参数发送结果'));
-          return;
-        }
-        this.state.lastFrame = frame;
-        this.state.sentCount += 1;
-        this.onSent(frame);
-        this.emit();
-        tuning?.resolve();
-      } catch (error) {
-        tuning?.reject(error instanceof Error ? error : new Error('参数发送失败'));
-        if (generation !== this.generation) return;
-        this.cancelTuning();
-        this.ready = false;
-        this.pending = false;
-        this.clearTimer();
-        this.state.armed = false;
-        this.state.motionHolding = false;
-        this.state.poseHolding = false;
-        this.state.control = neutral(this.state.control);
-        this.state.error = error instanceof Error ? error.message : '发送失败，请重新连接';
-        this.emit();
-      } finally {
-        if (tuning) this.tuningActive = false;
-      }
+      this.state.lastFrame = frame;
+      this.state.sentCount += 1;
+      this.onSent(frame);
+      this.emit();
+      tuning?.resolve();
+    } catch (error) {
+      tuning?.reject(error instanceof Error ? error : new Error('参数发送失败'));
+      if (generation !== this.generation || error instanceof SkippedWriteError) return;
+      this.cancelTuning();
+      this.ready = false;
+      this.pending = false;
+      this.clearTimer();
+      this.state.armed = false;
+      this.state.motionHolding = false;
+      this.state.poseHolding = false;
+      this.state.control = neutral(this.state.control);
+      this.state.error = error instanceof Error ? error.message : '发送失败，请重新连接';
+      this.emit();
+    } finally {
+      if (tuning) this.tuningActive = false;
     }
   }
 

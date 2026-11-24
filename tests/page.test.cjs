@@ -27,6 +27,7 @@ function fixture(t, overrides = {}) {
     scans: 0,
   };
   const calibrationReplies = {
+    'install status\n': 'install: active=0 ready=0 height=44.5 control=on\n',
     'uid\n': 'uid: 0123456789ABCDEF10203040\n',
     'anglebias\n': 'anglebias base=12.6000 effective=10.1234\n',
     'rollbias\n': 'rollbias base=-2.5000 raw=2.5000 effective=0.0000\n',
@@ -170,14 +171,14 @@ function fixture(t, overrides = {}) {
       await flush();
       assert.equal(page.data.demo, true);
     },
-    async connected() {
-      page.connectDevice(datasetEvent({ id: 'robot' }));
+    async connected(deviceId = 'robot') {
+      page.connectDevice(datasetEvent({ id: deviceId }));
       await flush();
       assert.equal(page.data.ble.status, 'selecting');
       page.selectEndpoint(datasetEvent({ index: 0 }));
       await flush();
       assert.equal(page.data.ready, true);
-      for (let index = 0; index < 3; index++) await f.advance(30);
+      for (let index = 0; index < 4; index++) await f.advance(30);
       if (page.data.ble.endpoint.notifyId) assert.equal(page.data.deviceInfo.busy, '');
       calls.writes.length = 0;
     },
@@ -270,11 +271,38 @@ test('ZX-D30 connection is ready for control without manual endpoint selection',
   );
 });
 
+test('duplicate advertisements do not render; signal changes update only the affected rows', async (t) => {
+  const f = fixture(t);
+  f.page.startScan();
+  await flush();
+  const advertise = (rssi) =>
+    f.emit('BluetoothDeviceFound', {
+      devices: [{ deviceId: 'car', name: 'D30LE_A', RSSI: rssi }],
+    });
+  advertise(-65);
+  f.calls.renders.length = 0;
+  for (let i = 0; i < 20; i++) advertise(-65);
+  await f.advance(250);
+  assert.deepEqual(f.calls.renders, []);
+  for (let rssi = -64; rssi <= -45; rssi++) advertise(rssi);
+  await f.advance(249);
+  assert.deepEqual(f.calls.renders, []);
+  await f.advance(1);
+  assert.deepEqual(f.calls.renders, [{ 'ble.devices[0].rssi': -45 }]);
+  advertise(-55);
+  f.page.stopScan();
+  await flush();
+  assert.equal(f.page.data.ble.devices[0].rssi, -55);
+  f.page.startScan();
+  await f.advance(300);
+  assert.deepEqual(f.page.data.ble.devices, []);
+});
+
 const tuningInput = (id, value) => ({ currentTarget: { dataset: { id } }, detail: { value } });
 
-function receiveParameters(f, text) {
+function receiveParameters(f, text, deviceId = 'robot') {
   f.emit('BLECharacteristicValueChange', {
-    deviceId: 'robot',
+    deviceId,
     serviceId: 'UART',
     characteristicId: 'RX',
     value: Uint8Array.from(Buffer.from(text)).buffer,
@@ -728,6 +756,97 @@ test('save timeout and late BLE reply never report page success', async (t) => {
   assert.equal(f.page.data.parameters.success, false);
 });
 
+for (const stop of ['stopMotion', 'toggleArmed']) {
+  test(`${stop} while a save is queued keeps BLE ready and delivers the neutral frame`, async (t) => {
+    const f = fixture(t);
+    await f.connected();
+    await f.move();
+    assert.equal(f.calls.writes.at(-1).text, 'R 0 -100 0 44.5');
+    const before = f.calls.writes.length;
+    f.page.saveParameters();
+    f.page[stop]();
+    await f.advance(25);
+    await f.advance(25);
+    assert.deepEqual(
+      f.calls.writes.slice(before).map((w) => w.text),
+      ['R 0 0 0 44.5'],
+    );
+    assert.equal(f.page.data.parameters.success, false);
+    assert.deepEqual(f.calls.closes, []);
+    assert.equal(f.page.data.ble.status, 'ready');
+    await f.move(9);
+    assert.equal(f.calls.writes.at(-1).text, 'R 0 -100 0 44.5');
+  });
+}
+
+for (const action of ['release', 'stop', 'background']) {
+  test(`queued movement uses the latest ${action} after a 400 ms native save write`, async (t) => {
+    const f = fixture(t);
+    await f.connected();
+    await f.move();
+    const write = f.api.writeBLECharacteristicValue;
+    let save;
+    f.api.writeBLECharacteristicValue = (options) => {
+      if (frameText(options.value) === 'save\n') save = options;
+      else write(options);
+    };
+    f.page.saveParameters();
+    await f.advance(25);
+    assert.ok(save);
+    const before = f.calls.writes.length;
+    f.page.onJoystickMove(touchEvent([touch(7, 100, 164)]));
+    await f.advance(75);
+    if (action === 'release') f.page.onJoystickEnd(touchEvent([touch(7)]));
+    if (action === 'stop') f.page.stopMotion();
+    if (action === 'background') f.page.onHide();
+    await f.advance(325);
+    assert.equal(f.calls.writes.length, before);
+    assert.deepEqual(f.calls.closes, []);
+    save.success({});
+    await f.advance(25);
+    assert.deepEqual(
+      f.calls.writes.slice(before).map((w) => w.text),
+      ['R 0 0 0 44.5'],
+    );
+    if (action === 'background') {
+      assert.deepEqual(f.calls.closes, ['robot']);
+      assert.equal(f.page.data.ready, false);
+    } else {
+      assert.equal(f.page.data.ble.status, 'ready');
+      assert.equal(f.page.data.armed, action === 'release');
+      f.page.stopMotion();
+      await f.advance(25);
+      assert.equal(f.calls.writes.length, before + 2, 'an explicit stop can be sent again');
+      await f.move(9);
+    }
+  });
+}
+
+test('a delayed save ACK after stopping and retrying requires fresh parameter readback', async (t) => {
+  const f = fixture(t);
+  await f.connected();
+  f.page.saveParameters();
+  await f.advance();
+  f.page.stopMotion();
+  await f.advance();
+  f.page.switchTab(datasetEvent({ tab: 'console' }));
+  f.page.switchTab(datasetEvent({ tab: 'control' }));
+  f.page.saveParameters();
+  await f.advance();
+  assert.deepEqual(
+    f.calls.writes.map((w) => w.text),
+    ['save\n', 'R 0 0 0 44.5', 'save\n'],
+  );
+  receiveParameters(f, 'save: ok\n');
+  await f.advance();
+  assert.equal(f.calls.writes.at(-1).text, 'params\n');
+  assert.equal(f.page.data.parameters.success, false);
+  receiveParameters(f, disarmedParameters);
+  await flush();
+  assert.equal(f.page.data.parameters.success, false);
+  assert.equal(f.page.data.parameters.status.unsaved, true);
+});
+
 for (const action of ['disconnect', 'background']) {
   test(`page ${action} cancels waiting for save and rejects its late result`, async (t) => {
     const f = fixture(t);
@@ -1067,6 +1186,48 @@ test('page reconnect keeps main motion format and requires rearming', async (t) 
   assert.ok(isNeutral(f.calls.writes.at(-1).text));
 });
 
+test('SIM and different BLE sessions cannot transfer a leg height or send motion on tab entry', async (t) => {
+  const f = fixture(t);
+  await f.demo();
+  for (const current of ['SIM', 'car-a']) {
+    await f.move();
+    f.page.onLegJoystickStart(touchEvent([legTouch(8, 500, 36)]));
+    await f.advance(100);
+    assert.equal(f.page.controller.snapshot().control.height, 61.5);
+    f.page.stopMotion();
+    await f.advance();
+    assert.equal(f.page.controller.snapshot().lastFrame, 'R 0 0 0 61.5');
+    if (current === 'SIM') f.page.toggleDemo();
+    else f.page.disconnectDevice();
+    await f.advance();
+    await f.connected(current === 'SIM' ? 'car-a' : 'car-b');
+    f.page.switchTab(datasetEvent({ tab: 'console' }));
+    f.page.switchTab(datasetEvent({ tab: 'control' }));
+    await f.advance(100);
+    assert.deepEqual(f.calls.writes, []);
+    assert.equal(f.page.data.control.height, 44.5);
+    f.page.toggleArmed();
+    await f.advance();
+    assert.equal(f.calls.writes[0].text, 'R 0 0 0 44.5');
+    f.page.stopMotion();
+    await f.advance();
+  }
+});
+
+test('arming writes neutral before a motion target received in the same native write slot', async (t) => {
+  const f = fixture(t);
+  await f.connected();
+  f.page.toggleArmed();
+  f.page.onJoystickStart(touchEvent([touch(7)]));
+  await f.advance(25);
+  assert.deepEqual(
+    f.calls.writes.map((w) => w.text),
+    ['R 0 0 0 44.5'],
+  );
+  await f.advance(50);
+  assert.equal(f.calls.writes.at(-1).text, 'R 0 -100 0 44.5');
+});
+
 test('page onHide cancels pending connection and cannot be revived by its late callback', async (t) => {
   let connecting;
   const f = fixture(t, {
@@ -1380,7 +1541,10 @@ for (const action of ['stop', 'background', 'tab', 'resize']) {
     assert.equal(f.page.controller.snapshot().control.speed, 0);
     assert.equal(f.page.controller.snapshot().control.turn, 0);
     assert.equal(f.page.controller.snapshot().control.roll, 0);
-    assert.equal(f.page.controller.snapshot().control.height, height);
+    assert.equal(
+      f.page.controller.snapshot().control.height,
+      action === 'background' ? 44.5 : height,
+    );
     f.page.onJoystickMove(touchEvent([touch(7)]));
     f.page.onLegJoystickMove(touchEvent([legTouch(8)]));
     assert.equal(f.page.controller.snapshot().control.speed, 0);
@@ -1393,7 +1557,7 @@ test('page exposes raw received serial text without treating command targets as 
   await f.connected();
   await f.move();
   const handshakeReceives = f.page.data.receiveCount;
-  assert.equal(handshakeReceives, 3);
+  assert.equal(handshakeReceives, 4);
   const desired = { ...f.page.controller.snapshot().control };
   const raw = 'pitch=1.2 speed=-3.4 unknown:7\r\n';
   const event = {
@@ -1479,6 +1643,63 @@ test('installation in simulation sends no physical BLE commands', async (t) => {
   await flush();
   assert.equal(f.calls.writes.length, 0);
   assert.equal(f.page.data.installation.status, null);
+});
+
+test('each real device must answer its own installation check before motion or control on', async (t) => {
+  const f = fixture(t, { calibrationReplies: { 'install status\n': 'receive: install status\n' } });
+  const inactive = 'install: active=0 ready=0 height=44.5 control=on\n';
+  const active = 'install: active=1 ready=1 height=44.5 control=off\n';
+  const expectLocked = async () => {
+    f.page.toggleArmed();
+    f.page.enableFirmwareControl();
+    await f.advance();
+    assert.equal(f.page.data.installationLock, true);
+    assert.equal(f.page.data.armed, false);
+    assert.ok(!f.calls.writes.some((w) => w.text.startsWith('R ') || w.text === 'control on\n'));
+  };
+  await f.connected('car-a');
+  await expectLocked();
+  f.page.saveParameters();
+  await f.advance();
+  assert.equal(
+    f.calls.writes.at(-1).text,
+    'save\n',
+    'a read-only installation check allows saving',
+  );
+  receiveParameters(f, 'save: unchanged\n', 'car-a');
+  await flush();
+  assert.equal(f.page.data.parameters.success, true);
+  receiveParameters(f, active, 'car-a');
+  await flush();
+  assert.equal(f.page.data.installation.status.active, true);
+  await expectLocked();
+  f.page.disconnectDevice();
+  await f.advance();
+  await f.connected('car-b');
+  receiveParameters(f, inactive, 'car-a');
+  await f.advance(5000);
+  assert.equal(f.page.data.installation.status, null);
+  await expectLocked();
+  f.page.queryInstallation();
+  await f.advance();
+  receiveParameters(f, inactive, 'car-b');
+  await flush();
+  assert.equal(f.page.data.installationLock, false);
+  await f.move();
+});
+
+test('a write-only connection keeps motion and firmware control locked', async (t) => {
+  const f = fixture(t, {
+    notifyBLECharacteristicValueChange: (options) => options.fail({ errCode: 10007 }),
+  });
+  await f.connected('write-only');
+  f.page.toggleArmed();
+  f.page.enableFirmwareControl();
+  await f.advance();
+  assert.equal(f.page.data.armed, false);
+  assert.equal(f.page.data.installationLock, true);
+  assert.match(f.page.data.installation.message, /通知/);
+  assert.deepEqual(f.calls.writes, []);
 });
 
 test('product switch waits for neutral and disconnect before navigating, including repeated taps', async (t) => {

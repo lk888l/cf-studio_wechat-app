@@ -110,7 +110,7 @@ Page({
       message: '连接设备后查询安装状态',
       success: false,
     } as InstallationSnapshot,
-    installationLock: false,
+    installationLock: true,
     parameterPanelOpen: false,
     parameterPreparing: false,
     parameterAvailable: false,
@@ -208,20 +208,22 @@ Page({
       },
       (installation) => {
         if (this.destroyed) return;
-        this.setData({ installation });
-        if (installation.status) this.setData({ installationLock: installation.status.active });
+        this.setData({
+          installation,
+          installationLock: installation.status?.active !== false,
+        });
         if (!installation.busy && installation.message) this.addLog('INFO', installation.message);
       },
     );
     this.controller = new RemoteController(
       wl1Main,
-      async (frame) => {
+      async (frame, options) => {
         if (this.data.demo) {
           // Deliberately isolated: demo never calls any BLE write API.
           return;
         }
         if (!this.transport) throw new Error('蓝牙服务未初始化');
-        await this.transport.send(frame);
+        await this.transport.send(frame, options);
       },
       (frame) => this.addLog(this.data.demo ? 'SIM' : 'TX', frame),
     );
@@ -258,6 +260,10 @@ Page({
     this.subscriptions.push(
       this.transport.subscribe((ble) => {
         if (this.destroyed) return;
+        if (ble.status === 'scanning' && this.data.ble.status === 'scanning') {
+          this.updateScanRows(ble.devices);
+          return;
+        }
         const ready =
           this.visible && wl1Main.supported && (this.data.demo || ble.status === 'ready');
         if (ble.deviceId !== this.data.ble.deviceId) {
@@ -272,7 +278,7 @@ Page({
           ble.endpoint?.notifyId !== this.data.ble.endpoint?.notifyId;
         if (sessionChanged) {
           this.resetTuning();
-          this.resetParameters();
+          this.resetParameters(true);
           this.installationService?.reset();
           this.deviceInfoService?.reset();
         }
@@ -283,7 +289,14 @@ Page({
         });
         this.controller?.setReady(ready);
         this.updateParameterAvailability();
-        if (sessionChanged && this.data.parameterAvailable) void this.startCalibrationHandshake();
+        if (sessionChanged && this.data.parameterAvailable) {
+          if (ble.endpoint?.notifyId) void this.installationService?.query();
+          else
+            this.installationService?.reset(
+              '此通道没有返回通知，请连接支持通知的串口以确认安装状态',
+            );
+          void this.startCalibrationHandshake();
+        }
         if (ble.error) this.setData({ error: ble.error });
       }),
     );
@@ -370,7 +383,7 @@ Page({
     this.setData({ busy: true });
     const work = async (): Promise<void> => {
       try {
-        await this.controller?.stop();
+        await this.controller?.stop('if-armed');
       } finally {
         try {
           await this.transport?.disconnect();
@@ -488,11 +501,14 @@ Page({
   },
 
   switchTab(event: WechatMiniprogram.BaseEvent) {
-    this.resetParameters();
-    this.releaseJoysticks();
     const tab = String(event.currentTarget.dataset.tab);
     if (['control', 'connection', 'console', 'installation'].includes(tab)) {
-      if (tab !== 'control') void this.controller?.stop();
+      this.resetParameters();
+      if (tab === 'control') this.releaseJoysticks();
+      else {
+        this.clearJoysticks();
+        void this.controller?.stop('if-armed');
+      }
       this.invalidateJoystickLayout();
       this.setData({ tab }, () => {
         if (tab === 'control') this.measureJoysticks();
@@ -504,7 +520,7 @@ Page({
 
   toggleDemo() {
     void this.perform(async () => {
-      await this.controller?.stop();
+      await this.controller?.stop('if-armed');
       await this.transport?.disconnect();
       this.controller?.setReady(false);
       if (!this.visible || this.destroyed) return;
@@ -536,6 +552,27 @@ Page({
     });
   },
 
+  updateScanRows(devices: BleState['devices']) {
+    const previous = this.data.ble.devices;
+    if (devices.length < previous.length) {
+      this.setData({ 'ble.devices': devices });
+      return;
+    }
+    const patch: Record<string, BleState['devices'][number] | number> = {};
+    devices.forEach((device, index) => {
+      const row = previous[index];
+      const path = `ble.devices[${index}]`;
+      if (
+        row?.deviceId !== device.deviceId ||
+        row.name !== device.name ||
+        row.preferred !== device.preferred
+      )
+        patch[path] = device;
+      else if (row.rssi !== device.rssi) patch[`${path}.rssi`] = device.rssi;
+    });
+    if (Object.keys(patch).length) this.setData(patch);
+  },
+
   startScan() {
     if (this.data.demo) return;
     void this.perform(async () => {
@@ -552,15 +589,15 @@ Page({
     const id = String(event.currentTarget.dataset.id || '');
     if (id)
       void this.perform(async () => {
-        await this.controller?.stop();
+        await this.controller?.stop('if-armed');
         await this.transport?.connect(id);
       });
   },
   disconnectDevice() {
     void this.perform(async () => {
-      await this.controller?.stop();
+      await this.controller?.stop('if-armed');
       await this.transport?.disconnect();
-      this.addLog('INFO', '已请求归零并断开；固件无执行确认。');
+      this.addLog('INFO', '已断开蓝牙连接。');
     });
   },
   selectEndpoint(event: WechatMiniprogram.BaseEvent) {
@@ -575,13 +612,14 @@ Page({
 
   async operateInstallation(action: 'on' | 'off' | 'query'): Promise<void> {
     if (!this.canOperateParameters() || this.data.installation.busy) return;
+    if (!this.data.ble.endpoint?.notifyId && action !== 'off') return;
     this.setData({ busy: true, error: '' });
     const service = this.installationService;
     const deviceId = this.data.ble.deviceId;
     try {
       if (action !== 'query') {
         this.clearJoysticks();
-        await this.controller?.stop();
+        await this.controller?.stop('if-armed');
         if (
           this.destroyed ||
           !this.visible ||
@@ -589,7 +627,6 @@ Page({
           deviceId !== this.data.ble.deviceId
         )
           return;
-        if (action === 'on') this.setData({ installationLock: true });
         await service?.set(action === 'on');
       } else await service?.query();
     } finally {
@@ -605,24 +642,24 @@ Page({
   queryInstallation() {
     void this.operateInstallation('query');
   },
+  canEnableControl() {
+    if (this.data.demo || !this.data.installationLock) return true;
+    this.setData({
+      error: this.data.installation.status?.active
+        ? '请先在安装页面确认退出安装模式'
+        : '本车安装状态待确认，请在安装页面刷新状态',
+    });
+    return false;
+  },
   toggleArmed() {
-    if (!this.data.demo && this.data.installationLock) {
-      this.setData({ error: '请先在安装页面确认退出安装模式' });
-      return;
-    }
-    if (
-      this.data.busy ||
-      this.data.parameters.busy ||
-      this.data.parameterPreparing ||
-      !this.data.ready ||
-      !this.visible
-    )
-      return;
-    this.resetParameters();
+    if (!this.visible || !this.data.ready) return;
     if (this.data.armed) {
-      void this.controller?.stop();
+      this.stopMotion();
       return;
     }
+    if (this.data.busy || this.data.parameters.busy || this.data.parameterPreparing) return;
+    if (!this.canEnableControl()) return;
+    this.resetParameters();
     try {
       this.controller?.arm();
       this.addLog('INFO', '控制已启用。摇杆握持不限时；松手归零，腿高保持。');
@@ -1045,16 +1082,15 @@ Page({
     }
   },
   updateParameterAvailability() {
-    this.setData({
-      parameterAvailable: this.visible && !this.data.demo && this.data.ble.status === 'ready',
-    });
+    const available = this.visible && !this.data.demo && this.data.ble.status === 'ready';
+    if (this.data.parameterAvailable !== available) this.setData({ parameterAvailable: available });
   },
-  resetParameters() {
+  resetParameters(newSession = false) {
     const message =
       this.data.parameters.busy === 'save'
         ? '未收到保存结果：操作已中断，请重新查询车端参数状态'
         : '';
-    this.parameterService?.reset(message);
+    this.parameterService?.reset(message, newSession);
   },
   openParameterPanel() {
     if (this.data.armed) this.releaseJoysticks();
@@ -1073,7 +1109,6 @@ Page({
       !this.data.tuningBusy &&
       !this.data.parameters.busy &&
       !this.data.parameterPreparing &&
-      !this.data.installation.busy &&
       !this.data.deviceInfo.busy
     );
   },
@@ -1121,11 +1156,8 @@ Page({
     }
   },
   enableFirmwareControl() {
-    if (this.data.installationLock) {
-      this.setData({ error: '请先在安装页面退出安装模式' });
-      return;
-    }
-    if (this.canOperateParameters()) void this.parameterService?.control(true);
+    if (this.canOperateParameters() && this.canEnableControl())
+      void this.parameterService?.control(true);
   },
   clearLogs() {
     this.logEntries = [];

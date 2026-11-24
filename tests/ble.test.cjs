@@ -142,6 +142,7 @@ test('BLE discovery preserves row order across signal changes and appends new de
       ['a', 'b', 'c'],
     );
   }
+  t.mock.timers.tick(250);
   assert.equal(f.state().devices[0].name, 'First renamed');
   assert.equal(f.state().devices[0].rssi, -10);
 });
@@ -193,6 +194,7 @@ test('BLE discovery pins the configured name prefix with stable order in both gr
     ['target-a', 'target-b', 'other-a', 'other-b'],
   );
   assert.equal(f.state().devices[1].name, 'D30LE_B');
+  t.mock.timers.tick(250);
   assert.equal(f.state().devices[1].rssi, -5);
 });
 
@@ -340,6 +342,47 @@ test('BLE drops stale queued commands without replaying them after congestion', 
   await stale;
   assert.equal(Buffer.from(heldWrite.value).toString('ascii'), 'S:100;');
   assert.equal(f.state().status, 'ready');
+});
+
+test('a cancelled pre-write hook skips native I/O without closing the connection', async (t) => {
+  const f = fixture(t);
+  await f.ready();
+  await assert.rejects(
+    f.transport.send('save\n', () => {
+      throw new Error('参数操作已取消');
+    }),
+    /已取消/,
+  );
+  await f.transport.send('R 0 0 0 44.5');
+  assert.deepEqual(
+    f.calls.writes.map((write) => Buffer.from(write.value).toString()),
+    ['R 0 0 0 44.5'],
+  );
+  assert.equal(f.state().status, 'ready');
+  assert.deepEqual(f.calls.closes, []);
+});
+
+test('a release takes the next UART slot ahead of an already queued read', async (t) => {
+  const f = fixture(t);
+  await f.ready();
+  await f.transport.send('R 0 -100 0 44.5');
+  const query = f.transport.send('params\n');
+  let released = false;
+  const motion = f.transport.send('R 0 -60 0 44.5', {
+    currentFrame: () => (released ? 'R 0 0 0 44.5' : 'R 0 -60 0 44.5'),
+    isUrgent: () => released,
+  });
+  await flush();
+  released = true;
+  t.mock.timers.tick(25);
+  await motion;
+  await flush();
+  t.mock.timers.tick(25);
+  await query;
+  assert.deepEqual(
+    f.calls.writes.map((w) => Buffer.from(w.value).toString()),
+    ['R 0 -100 0 44.5', 'R 0 0 0 44.5', 'params\n'],
+  );
 });
 
 test('SoftEngine chunks remain ordered and cannot interleave with the next command', async (t) => {

@@ -30,7 +30,12 @@ interface ReplyWaiter {
 
 /** Only a complete UART reply from the current BLE session confirms installation. */
 export class InstallationService {
-  private state: InstallationSnapshot = { busy: '', status: null, message: '', success: false };
+  private state: InstallationSnapshot = {
+    busy: '',
+    status: null,
+    message: '',
+    success: false,
+  };
   private line = '';
   private discardLine = false;
   private epoch = 0;
@@ -63,7 +68,7 @@ export class InstallationService {
       }
     }
   }
-  reset(): void {
+  reset(message = '状态待查询；断开连接不会退出车端安装模式'): void {
     ++this.epoch;
     this.waiter?.cancel('连接已切换，请重新查询安装状态');
     this.line = '';
@@ -72,7 +77,7 @@ export class InstallationService {
       busy: '',
       status: null,
       success: false,
-      message: '状态待查询；断开连接不会退出车端安装模式',
+      message,
     });
   }
   query(): Promise<void> {
@@ -90,7 +95,7 @@ export class InstallationService {
         const status = parseInstallationStatus(line);
         return status ? { status } : null;
       },
-      '未收到安装回执，请确认固件支持安装模式并重新查询',
+      '未收到安装回执，请检查蓝牙连接后刷新状态',
     );
     if ('error' in result) throw new Error(result.error);
     return result.status;
@@ -98,7 +103,12 @@ export class InstallationService {
   private async run(command: InstallationCommand): Promise<void> {
     if (this.state.busy) return;
     const epoch = this.epoch;
-    this.patch({ busy: command, status: null, message: '等待车端确认…', success: false });
+    this.patch({
+      busy: command,
+      status: null,
+      message: '等待车端确认…',
+      success: false,
+    });
     try {
       let status = await this.read(command);
       if (epoch !== this.epoch) return;
@@ -109,7 +119,7 @@ export class InstallationService {
       if (command === 'install on' && !status.ready) {
         status = await this.read('install status');
         if (epoch !== this.epoch) return;
-        if (!status.active) throw new Error('安装锁定已解除，请重新查询');
+        if (!status.active) throw new Error('安装锁定未确认，请重新查询');
       }
       this.patch({
         status,
@@ -118,7 +128,9 @@ export class InstallationService {
           ? status.ready
             ? '最低腿高已锁定，可以安装舵盘和连杆'
             : '正在移动到安装位置，请刷新状态后开始安装'
-          : '安装模式已退出；需要运行时，请手动恢复车端控制',
+          : status.control
+            ? '安装模式未启用，车端控制已开启'
+            : '安装模式已退出；需要运行时，请手动恢复车端控制',
       });
     } catch (error) {
       if (epoch === this.epoch)
@@ -168,7 +180,7 @@ export class InstallationService {
         started = true;
       }).catch((error: unknown) => {
         waiter.cancel(
-          command === 'install on'
+          command === 'install on' && started
             ? '安装状态未确认：蓝牙发送失败，请重新连接并查询状态'
             : error instanceof Error
               ? error.message

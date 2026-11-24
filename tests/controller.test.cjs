@@ -273,7 +273,8 @@ test('stop during active tuning waits for its write then neutral; reconnect cann
   controller.setReady(true);
   calls[2].resolve();
   await stale;
-  assert.equal(controller.snapshot().lastFrame, neutralFrame);
+  assert.equal(controller.snapshot().lastFrame, '');
+  assert.equal(controller.snapshot().sentCount, 0);
 });
 
 test('tuning write failure stops motion and rejects disconnected tuning', async (t) => {
@@ -773,7 +774,7 @@ test('disconnect clears both holds and neither stale stick can resume after reco
   controller.movePose(78.5, 18);
   timing.advance(100);
   await flush();
-  assert.equal(frames.at(-1), 'R 0 0 0 68.5');
+  assert.equal(frames.at(-1), neutralFrame);
   assert.equal(controller.snapshot().motionHolding, false);
   assert.equal(controller.snapshot().poseHolding, false);
 });

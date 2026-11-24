@@ -311,13 +311,14 @@
         ><view
           ><text class="arming-label">启用本地控制</text
           ><text class="arming-state"
-            >{{!ready ? '先连接设备或启用模拟' : (armed ? '已启用 · 双手操作' :
-            '摇杆已锁定')}}</text
+            >{{!ready ? '先连接设备或启用模拟' : (armed ? '已启用 · 双手操作' : (!demo &&
+            installationLock ? (installation.status && installation.status.active ?
+            '安装模式中，请先退出' : '安装状态待确认，请到安装页查看') : '摇杆已锁定'))}}</text
           ></view
         ><switch
           class="arm-switch"
           checked="{{armed}}"
-          disabled="{{!ready || busy || parameters.busy || parameterPreparing}}"
+          disabled="{{!ready || (!armed && (busy || parameters.busy || parameterPreparing || (!demo && installationLock)))}}"
           color="#458dcc"
           bindchange="toggleArmed"
           aria-label="启用本地控制"
@@ -415,7 +416,7 @@
             ><view class="discovered-device"
               ><text class="device-name">{{item.name || '未命名 BLE 设备'}}</text
               ><text class="device-id" selectable>{{item.deviceId}}</text
-              ><text class="device-signal">信号 {{item.rssi || '--'}} dBm</text></view
+              ><text class="device-signal">信号 {{item.rssi}} dBm</text></view
             ><button
               class="button button-small"
               data-id="{{item.deviceId}}"
@@ -439,7 +440,9 @@
             ><view class="section-heading"
               ><text class="panel-title">通讯已就绪</text
               ><view class="small-badge">已连接</view></view
-            ><text class="section-description">可以返回遥控台启用本地控制。</text></view
+            ><text class="section-description"
+              >{{installationLock ? installation.message : '可以返回遥控台启用本地控制。'}}</text
+            ></view
           >
           <view wx:elif="{{ble.status === 'selecting' && !busy}}" class="panel endpoint-panel"
             ><view class="section-heading"
@@ -601,21 +604,21 @@
           <button
             class="primary-button"
             bindtap="enterInstallation"
-            disabled="{{!parameterAvailable || busy || installation.busy || (installation.status && installation.status.active)}}"
+            disabled="{{!parameterAvailable || !ble.endpoint.notifyId || busy || installation.busy || deviceInfo.busy || (installation.status && installation.status.active)}}"
           >
             进入安装模式
           </button>
           <button
             class="secondary-button"
             bindtap="queryInstallation"
-            disabled="{{!parameterAvailable || busy || installation.busy}}"
+            disabled="{{!parameterAvailable || !ble.endpoint.notifyId || busy || installation.busy || deviceInfo.busy}}"
           >
             刷新状态
           </button>
           <button
             class="secondary-button"
             bindtap="finishInstallation"
-            disabled="{{!parameterAvailable || busy || installation.busy}}"
+            disabled="{{!parameterAvailable || busy || installation.busy || deviceInfo.busy}}"
           >
             安装完成，退出模式
           </button>
@@ -628,7 +631,7 @@
       <view class="panel installation-panel">
         <text class="panel-title">安装期间保持位置</text>
         <text class="section-description"
-          >切换页面或蓝牙断开不会解除车端安装锁定。重新连接后，请刷新状态；设备重启后需重新进入安装模式。</text
+          >切换页面或蓝牙断开后，车端继续保持安装锁定。重新连接会自动查询本车状态，也可以点击“刷新状态”。</text
         >
         <text class="section-description"
           >“已锁定”表示舵机目标 PWM
@@ -725,7 +728,7 @@
             <button
               class="button button-secondary"
               bindtap="enableFirmwareControl"
-              disabled="{{!parameterAvailable || busy || tuningBusy || parameters.busy || parameterPreparing || deviceInfo.busy}}"
+              disabled="{{!parameterAvailable || installationLock || busy || tuningBusy || parameters.busy || parameterPreparing || deviceInfo.busy}}"
             >
               {{parameters.busy === 'on' ? '恢复中…' : '恢复车端控制'}}
             </button>

@@ -147,6 +147,76 @@ test('saving needs no params response, and malformed status cannot confirm a sav
   assert.deepEqual(frames, ['save\n']);
 });
 
+for (const [fields, saved] of [
+  ['unsaved=true flash_valid=true', false],
+  ['unsaved=false flash_valid=false', false],
+  ['unsaved=false', false],
+  ['unsaved=false flash_valid=true', true],
+]) {
+  test(`a retried save is verified against car state ${fields}`, async (t) => {
+    const { service, frames } = fixture(t);
+    const first = service.save();
+    t.mock.timers.tick(PARAMETER_TIMEOUT_MS);
+    await first;
+    service.reset(); // Tab changes cancel operations without starting a new BLE session.
+    const retry = service.save();
+    assert.deepEqual(frames, ['save\n', 'save\n']);
+    service.receive('save: ok\nsave: unchanged\n');
+    await flush();
+    assert.equal(service.snapshot().success, false);
+    assert.equal(service.snapshot().busy, 'save');
+    assert.equal(frames.at(-1), 'params\n');
+    service.receive(`params: armed=false ${fields}\n`);
+    await retry;
+    assert.equal(service.snapshot().success, saved);
+    if (saved) assert.match(service.snapshot().message, /已核实/);
+
+    service.reset('', true);
+    frames.length = 0;
+    const nextCar = service.save();
+    service.receive('save: ok\n');
+    await nextCar;
+    assert.deepEqual(frames, ['save\n']);
+    assert.equal(service.snapshot().message, '保存成功');
+  });
+}
+
+test('unanswered readback cannot confirm a later retry with an old params reply', async (t) => {
+  const { service } = fixture(t);
+  const save = service.save();
+  t.mock.timers.tick(PARAMETER_TIMEOUT_MS);
+  await save;
+  const retry = service.save();
+  service.receive('save: ok\n');
+  await flush();
+  t.mock.timers.tick(PARAMETER_TIMEOUT_MS);
+  await retry;
+  const again = service.save();
+  service.receive('save: ok\n');
+  await flush();
+  service.receive('params: armed=false unsaved=false flash_valid=true\n');
+  await again;
+  assert.equal(service.snapshot().success, false);
+  assert.match(service.snapshot().message, /重新连接/);
+});
+
+test('cancelling a save before its native write leaves the next save unambiguous', async (t) => {
+  const starts = [];
+  const { service } = fixture(t, async (_frame, start) => {
+    starts.push(start);
+  });
+  const cancelled = service.save();
+  service.reset();
+  await cancelled;
+  assert.throws(starts[0], /已取消/);
+  const retry = service.save();
+  starts[1]();
+  service.receive('save: ok\n');
+  await retry;
+  assert.equal(starts.length, 2);
+  assert.equal(service.snapshot().message, '保存成功');
+});
+
 test('manual off still reports the actual queried control state', async (t) => {
   const { service, frames } = fixture(t);
   const closing = service.control(false);

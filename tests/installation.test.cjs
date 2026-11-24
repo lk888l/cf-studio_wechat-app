@@ -82,7 +82,7 @@ test('disconnect and late acknowledgements cannot report a successful installati
   assert.equal(service.snapshot().status, null);
   assert.equal(service.snapshot().success, false);
 });
-test('unsupported firmware times out without a false locked state', async (t) => {
+test('an echoed install command leaves the installation state unconfirmed on timeout', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const service = new InstallationService(
     async (_, start) => start(),

@@ -65,6 +65,7 @@ export class ParameterService {
   private discardLine = false;
   private epoch = 0;
   private waiter: ReplyWaiter | null = null;
+  private readonly uncertainReplies = new Set<'save' | 'params'>();
 
   constructor(
     private readonly write: (frame: string, onStart: () => void) => Promise<void>,
@@ -98,9 +99,10 @@ export class ParameterService {
     }
   }
 
-  reset(message = ''): void {
+  reset(message = '', newSession = false): void {
     ++this.epoch;
     this.waiter?.cancel(message || '连接或操作已切换');
+    if (newSession) this.uncertainReplies.clear();
     this.line = '';
     this.discardLine = false;
     this.patch({ busy: '', status: null, message, success: false });
@@ -125,7 +127,26 @@ export class ParameterService {
       this.patch({ status: null, message: '等待保存结果…' });
       const result = await this.request('save', parseSaveResult, '未收到保存结果');
       this.checkEpoch(epoch);
-      this.patch(result);
+      if (!this.uncertainReplies.has('save')) {
+        this.patch(result);
+        return;
+      }
+      // UART replies have no request ID. After an interrupted write, even a
+      // complete save: line can still belong to the previous attempt.
+      if (this.uncertainReplies.has('params'))
+        throw new Error('保存和状态回执均未对齐，请重新连接后查询车端参数状态');
+      this.patch({ message: '正在核对车端参数与 Flash 状态…' });
+      const status = await this.readStatus(epoch);
+      this.checkEpoch(epoch);
+      const saved = !status.unsaved && status.flashValid === true;
+      this.patch({
+        success: saved,
+        message: saved
+          ? '已核实车端当前参数已保存'
+          : status.unsaved
+            ? '车端仍有未保存修改'
+            : '未能确认车端 Flash 配置有效',
+      });
     });
   }
 
@@ -208,7 +229,10 @@ export class ParameterService {
           if (result !== null && finish()) resolve(result);
         },
         cancel: (message) => {
-          if (finish()) reject(new Error(message));
+          if (!finish()) return;
+          if (started && (command === 'save' || command === 'params'))
+            this.uncertainReplies.add(command);
+          reject(new Error(message));
         },
       };
       const timer = setTimeout(() => waiter.cancel(timeoutMessage), PARAMETER_TIMEOUT_MS);
@@ -223,7 +247,7 @@ export class ParameterService {
         started = true;
       }).catch((error: unknown) => {
         waiter.cancel(
-          command === 'save'
+          command === 'save' && started
             ? '未收到保存结果：蓝牙发送失败，请重新连接并查询参数状态'
             : error instanceof Error
               ? error.message

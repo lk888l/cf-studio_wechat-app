@@ -1,3 +1,5 @@
+import { SkippedWriteError, WriteOptions } from './write';
+
 /** WeChat exposes BLE GATT, not the classic Bluetooth SPP used by ordinary HC-05 modules. */
 export interface BleEndpoint {
   serviceId: string;
@@ -21,6 +23,12 @@ export interface BleTransportOptions {
   preferredNamePrefix?: string;
 }
 
+interface QueuedWrite {
+  isUrgent?: () => boolean;
+  run: () => Promise<void>;
+  cancel: () => void;
+}
+
 type Callbacks<T> = { success: (value: T) => void; fail: (reason: unknown) => void };
 type ModernProperties = WechatMiniprogram.BLECharacteristicProperties & {
   writeNoResponse?: boolean;
@@ -30,6 +38,7 @@ type ModernWrite = WechatMiniprogram.WriteBLECharacteristicValueOption & {
 };
 
 const SCAN_MS = 15000;
+const SCAN_REFRESH_MS = 250;
 const API_TIMEOUT_MS = 6000;
 const CONNECT_TIMEOUT_MS = 10000;
 const WRITE_TIMEOUT_MS = 2000;
@@ -95,12 +104,15 @@ export class BleTransport {
   private session = 0;
   private scanGeneration = 0;
   private scanTimer: number | undefined;
+  private deviceTimer: number | undefined;
+  private devicesById = new Map<string, BleState['devices'][number]>();
   private disposed = false;
   private adapterOpened = false;
   private discoveryStarted = false;
   private discoveryTail: Promise<void> = Promise.resolve();
   private closeTail: Promise<void> = Promise.resolve();
-  private writeTail: Promise<void> = Promise.resolve();
+  private writeQueue: QueuedWrite[] = [];
+  private writing = false;
   private lastWriteFinished = 0;
   private selecting = false;
   private connectionPending = false;
@@ -136,6 +148,7 @@ export class BleTransport {
     this.assertAlive();
     const session = this.session;
     const generation = ++this.scanGeneration;
+    this.devicesById.clear();
     this.patch({ status: 'scanning', devices: [], error: '' });
     try {
       await this.openAdapter(session);
@@ -147,7 +160,7 @@ export class BleTransport {
           (callbacks) => {
             wx.startBluetoothDevicesDiscovery({
               allowDuplicatesKey: true,
-              interval: 0,
+              interval: SCAN_REFRESH_MS,
               ...callbacks,
             });
           },
@@ -190,6 +203,7 @@ export class BleTransport {
 
   async stopScan(): Promise<void> {
     ++this.scanGeneration;
+    if (this.deviceTimer !== undefined) this.publishDevices();
     this.clearScanTimer();
     if (this.state.status === 'scanning') this.patch({ status: 'idle' });
     await this.discoveryOperation(async () => {
@@ -338,8 +352,46 @@ export class BleTransport {
     }
   }
 
-  async send(frame: string, onStart?: () => void): Promise<void> {
+  async send(frame: string, onStartOrOptions: WriteOptions | (() => void) = {}): Promise<void> {
     this.assertAlive();
+    this.validateFrame(frame);
+    if (this.state.status !== 'ready' || !this.state.endpoint)
+      throw new Error('蓝牙尚未就绪，请先连接并确认 UART 特征');
+    const options =
+      typeof onStartOrOptions === 'function' ? { onStart: onStartOrOptions } : onStartOrOptions;
+    const session = this.session;
+    const queuedAt = Date.now();
+    return new Promise<void>((resolve, reject) => {
+      this.writeQueue.push({
+        isUrgent: options.isUrgent,
+        run: () => this.writeFrame(frame, options, session, queuedAt).then(resolve, reject),
+        cancel: () => reject(new Error('蓝牙会话已结束，命令已取消')),
+      });
+      if (!this.writing) void this.drainWrites(session);
+    });
+  }
+
+  private async drainWrites(session: number): Promise<void> {
+    this.writing = true;
+    try {
+      while (this.isCurrent(session) && this.writeQueue.length) {
+        const delay = FRAME_GAP_MS - (Date.now() - this.lastWriteFinished);
+        if (delay > 0) await this.pause(delay, session);
+        else await Promise.resolve();
+        if (!this.isCurrent(session)) return;
+        // Select after the UART idle gap so a release can take the very next slot.
+        const urgent = this.writeQueue.findIndex((item) => item.isUrgent?.());
+        const [next] = this.writeQueue.splice(Math.max(0, urgent), 1);
+        await next.run();
+      }
+    } catch (reason) {
+      if (this.isCurrent(session)) this.failSession(errorMessage(reason, '发送串口命令'));
+    } finally {
+      if (session === this.session) this.writing = false;
+    }
+  }
+
+  private validateFrame(frame: string): void {
     // Legacy idle-delimited commands still require one write. Only explicitly
     // framed SoftEngine commands can span multiple 20-byte GATT writes.
     const framed = /^@[^@\r\n\0]{1,32}\r?\n$/.test(frame);
@@ -350,58 +402,60 @@ export class BleTransport {
     ) {
       throw new Error('串口命令须为 ASCII：旧协议最多 20 字节，SoftEngine 使用 @命令\\n 分帧');
     }
-    if (this.state.status !== 'ready' || !this.state.endpoint)
-      throw new Error('蓝牙尚未就绪，请先连接并确认 UART 特征');
-    const session = this.session;
-    const endpoint = { ...this.state.endpoint };
-    const deviceId = this.state.deviceId;
-    const queuedAt = Date.now();
-    const operation = this.writeTail.then(async () => {
-      this.checkSession(session);
-      if (this.state.status !== 'ready') throw new Error('蓝牙连接已失效，命令未发送');
-      const delay = Math.max(0, FRAME_GAP_MS - (Date.now() - this.lastWriteFinished));
-      if (delay) await this.pause(delay, session);
-      this.checkSession(session);
-      if (Date.now() - queuedAt > MAX_QUEUE_AGE_MS)
-        throw new Error('命令等待过久，已丢弃，避免执行过期控制');
-      const bytes = new Uint8Array(frame.length);
-      for (let index = 0; index < frame.length; index++) bytes[index] = frame.charCodeAt(index);
-      try {
-        for (let offset = 0; offset < bytes.length; offset += 20) {
-          if (offset) await this.pause(FRAME_GAP_MS, session);
-          this.checkSession(session);
-          if (offset && Date.now() - queuedAt > MAX_QUEUE_AGE_MS)
+  }
+
+  private async writeFrame(
+    frame: string,
+    options: WriteOptions,
+    session: number,
+    queuedAt: number,
+  ): Promise<void> {
+    this.checkSession(session);
+    const { deviceId, endpoint } = this.state;
+    if (!endpoint) throw new Error('蓝牙连接已失效，命令未发送');
+    if (options.currentFrame) {
+      frame = options.currentFrame();
+      this.validateFrame(frame);
+    } else if (Date.now() - queuedAt > MAX_QUEUE_AGE_MS) {
+      throw new SkippedWriteError('命令等待过久，已丢弃，避免执行过期控制');
+    }
+    const bytes = Uint8Array.from(frame, (character) => character.charCodeAt(0));
+    // A cancelled transaction can veto the first byte without damaging the connection.
+    options.onStart?.();
+    const frameTime = options.currentFrame ? Date.now() : queuedAt;
+    try {
+      for (let offset = 0; offset < bytes.length; offset += 20) {
+        if (offset) {
+          await this.pause(FRAME_GAP_MS, session);
+          if (Date.now() - frameTime > MAX_QUEUE_AGE_MS)
             throw new Error('分帧发送等待过久，已取消剩余数据');
-          const chunk = bytes.slice(offset, offset + 20);
-          if (offset === 0) onStart?.();
-          await this.call<WechatMiniprogram.GeneralCallbackResult>(
-            '发送串口命令',
-            (callbacks) => {
-              const options: ModernWrite = {
-                deviceId,
-                serviceId: endpoint.serviceId,
-                characteristicId: endpoint.writeId,
-                value: chunk.buffer,
-                writeType: endpoint.writeType,
-                ...callbacks,
-              };
-              wx.writeBLECharacteristicValue(options);
-            },
-            WRITE_TIMEOUT_MS,
-            session,
-          );
-          this.checkSession(session);
-          this.lastWriteFinished = Date.now();
         }
-      } catch (reason) {
-        if (this.isCurrent(session))
-          this.failSession(`${errorMessage(reason, '发送串口命令')}；已停止发送，请重新连接`);
-        throw reason;
+        this.checkSession(session);
+        const chunk = bytes.slice(offset, offset + 20);
+        await this.call<WechatMiniprogram.GeneralCallbackResult>(
+          '发送串口命令',
+          (callbacks) => {
+            const write: ModernWrite = {
+              deviceId,
+              serviceId: endpoint.serviceId,
+              characteristicId: endpoint.writeId,
+              value: chunk.buffer,
+              writeType: endpoint.writeType,
+              ...callbacks,
+            };
+            wx.writeBLECharacteristicValue(write);
+          },
+          WRITE_TIMEOUT_MS,
+          session,
+        );
+        this.checkSession(session);
+        this.lastWriteFinished = Date.now();
       }
-    });
-    // Keep the queue drainable without converting the caller's failure into success.
-    this.writeTail = operation.catch(() => undefined);
-    await operation;
+    } catch (reason) {
+      if (this.isCurrent(session))
+        this.failSession(`${errorMessage(reason, '发送串口命令')}；已停止发送，请重新连接`);
+      throw reason;
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -442,29 +496,43 @@ export class BleTransport {
     event: WechatMiniprogram.OnBluetoothDeviceFoundCallbackResult,
   ): void => {
     if (this.disposed || this.state.status !== 'scanning') return;
-    const devices = new Map(this.state.devices.map((device) => [device.deviceId, device]));
+    let changed = false;
+    let publishNow = false;
     for (const device of event.devices) {
       if (!device.deviceId) continue;
-      const previous = devices.get(device.deviceId);
+      const previous = this.devicesById.get(device.deviceId);
       const name =
         device.localName || device.name || (previous && previous.name) || '未命名 BLE 设备';
-      devices.set(device.deviceId, {
+      const rssi = Number.isFinite(device.RSSI) ? device.RSSI : (previous?.rssi ?? -100);
+      if (previous?.name === name && previous.rssi === rssi) continue;
+      changed = true;
+      if (previous?.name !== name) publishNow = true;
+      this.devicesById.set(device.deviceId, {
         deviceId: device.deviceId,
         name,
-        rssi: Number.isFinite(device.RSSI) ? device.RSSI : previous ? previous.rssi : -100,
+        rssi,
         preferred: Boolean(
           this.options.preferredNamePrefix && name.startsWith(this.options.preferredNamePrefix),
         ),
       });
     }
-    // Keep existing rows in order within each group; changing RSSI must not move connect buttons.
-    const preferred: BleState['devices'] = [];
-    const other: BleState['devices'] = [];
-    for (const device of devices.values()) {
-      (device.preferred ? preferred : other).push(device);
-    }
-    this.patch({ devices: [...preferred, ...other] });
+    if (publishNow) this.publishDevices(true);
+    else if (changed && this.deviceTimer === undefined)
+      this.deviceTimer = setTimeout(() => this.publishDevices(), SCAN_REFRESH_MS);
   };
+
+  private publishDevices(regroup = false): void {
+    if (this.deviceTimer !== undefined) clearTimeout(this.deviceTimer);
+    this.deviceTimer = undefined;
+    let devices = [...this.devicesById.values()];
+    if (regroup) {
+      devices = devices
+        .filter((device) => device.preferred)
+        .concat(devices.filter((device) => !device.preferred));
+      this.devicesById = new Map(devices.map((device) => [device.deviceId, device]));
+    }
+    this.patch({ devices });
+  }
 
   private readonly handleAdapter = (
     event: WechatMiniprogram.OnBluetoothAdapterStateChangeCallbackResult,
@@ -477,6 +545,7 @@ export class BleTransport {
     } else if (!event.discovering && this.discoveryStarted && this.state.status === 'scanning') {
       this.discoveryStarted = false;
       ++this.scanGeneration;
+      if (this.deviceTimer !== undefined) this.publishDevices();
       this.clearScanTimer();
       this.patch({ status: 'idle' });
     }
@@ -649,12 +718,16 @@ export class BleTransport {
     this.selecting = false;
     this.lastWriteFinished = 0;
     for (const cancel of [...this.pending]) cancel();
-    this.writeTail = Promise.resolve();
+    for (const write of this.writeQueue) write.cancel();
+    this.writeQueue = [];
+    this.writing = false;
   }
 
   private clearScanTimer(): void {
     if (this.scanTimer !== undefined) clearTimeout(this.scanTimer);
     this.scanTimer = undefined;
+    if (this.deviceTimer !== undefined) clearTimeout(this.deviceTimer);
+    this.deviceTimer = undefined;
   }
 
   private discoveryOperation(operation: () => Promise<void>): Promise<void> {
